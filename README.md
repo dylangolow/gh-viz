@@ -46,6 +46,8 @@ If you run without args in an interactive terminal, startup prompts you for:
 2. `Guided text output`
 3. `Text output (defaults)`
 
+Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also work).
+
 ## What You Get
 
 - summary window totals (commits, non-merge, repos, orgs)

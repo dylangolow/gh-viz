@@ -5,6 +5,7 @@ import { Command } from "commander"
 import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import process from "node:process"
+import * as readlineCore from "node:readline"
 import readline from "node:readline/promises"
 
 const ACCEPT_HEADER = "Accept: application/vnd.github.cloak-preview+json"
@@ -576,14 +577,80 @@ async function askChoice<T extends string>(prompt: string, choices: readonly T[]
 }
 
 async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
-  console.log("\nSelect mode:")
-  console.log("  1) TUI (interactive browser)")
-  console.log("  2) Guided text output")
-  console.log("  3) Text output (defaults)")
-  const raw = await ask("Mode", "1")
-  if (raw === "2") return "guided-text"
-  if (raw === "3") return "text"
-  return "tui"
+  const items: Array<{ value: "tui" | "guided-text" | "text"; label: string }> = [
+    { value: "tui", label: "TUI (interactive browser)" },
+    { value: "guided-text", label: "Guided text output" },
+    { value: "text", label: "Text output (defaults)" },
+  ]
+
+  let selected = 0
+  const totalLines = items.length + 1
+
+  const drawMenu = (firstRender: boolean): void => {
+    if (!firstRender) {
+      process.stdout.write(`\x1B[${totalLines}A`)
+    }
+
+    process.stdout.write("\x1B[2K\rSelect mode (use ↑/↓, Enter to confirm)\n")
+    items.forEach((item, i) => {
+      const marker = i === selected ? ">" : " "
+      process.stdout.write(`\x1B[2K\r${marker} ${i + 1}) ${item.label}\n`)
+    })
+  }
+
+  if (!process.stdin.isTTY) {
+    return items[0]!.value
+  }
+
+  drawMenu(true)
+  readlineCore.emitKeypressEvents(process.stdin)
+  const wasRaw = process.stdin.isRaw ?? false
+  const wasPaused = process.stdin.isPaused()
+  process.stdin.setRawMode(true)
+  if (wasPaused) process.stdin.resume()
+
+  return await new Promise(resolve => {
+    const onKeypress = (str: string, key: readlineCore.Key): void => {
+      if (key.name === "up") {
+        selected = (selected - 1 + items.length) % items.length
+        drawMenu(false)
+        return
+      }
+
+      if (key.name === "down") {
+        selected = (selected + 1) % items.length
+        drawMenu(false)
+        return
+      }
+
+      if (str === "1" || str === "2" || str === "3") {
+        selected = Number(str) - 1
+        drawMenu(false)
+        return
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        cleanup()
+        process.stdout.write("\n")
+        resolve(items[selected]!.value)
+        return
+      }
+
+      if (key.ctrl && key.name === "c") {
+        cleanup()
+        process.stdout.write("\n")
+        process.exit(1)
+      }
+    }
+
+    const cleanup = (): void => {
+      process.stdin.off("keypress", onKeypress)
+      if (!wasRaw) process.stdin.setRawMode(false)
+      if (wasPaused) process.stdin.pause()
+    }
+
+    process.stdin.on("keypress", onKeypress)
+  })
 }
 
 async function runTextWizard(options: RawOptions): Promise<RawOptions> {
@@ -739,7 +806,7 @@ async function runTui(options: RawOptions): Promise<number> {
     left: 0,
     width: "100%",
     height: 1,
-    content: "Keys: Up/Down move, Tab switch, Enter apply/open, Esc clear filter, o open commit, r reset, q quit",
+    content: "Keys: Up/Down move, Tab switch pane, Enter apply/open, Esc clear filter, o open commit, r reset, q quit",
   })
 
   screen.append(header)
@@ -947,8 +1014,14 @@ async function runTui(options: RawOptions): Promise<number> {
       }
     }
 
-    const title = "gh viz TUI | Tab switch pane | Enter apply/open | Esc clear filter | q quit"
+    const activePane = focus === "commits" ? "COMMITS" : "FILTERS"
+    const title = `gh viz TUI | Active pane: ${activePane} | Tab switch pane | Enter apply/open | Esc clear filter | q quit`
     header.setContent(ellipsize(title, Math.max(10, screen.width as number)))
+
+    commitsLabel.setContent(focus === "commits" ? "Commits (chart window) [ACTIVE]" : "Commits (chart window)")
+    commitsLabel.style = { underline: true, bold: focus === "commits" }
+    filtersLabel.setContent(focus === "filters" ? "Filters [ACTIVE]" : "Filters")
+    filtersLabel.style = { underline: true, bold: focus === "filters" }
 
     summary.setContent(
       ellipsize(
@@ -981,7 +1054,8 @@ async function runTui(options: RawOptions): Promise<number> {
       ),
     )
 
-    status.setContent(ellipsize(state.status || "Ready.", Math.max(10, screen.width as number)))
+    const statusText = state.status || "Ready."
+    status.setContent(ellipsize(`Pane=${activePane} | ${statusText}`, Math.max(10, screen.width as number)))
     status.style = state.statusError ? { fg: "red" } : { fg: "white" }
 
     if (focus === "commits") commitsList.focus()
