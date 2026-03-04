@@ -110,6 +110,24 @@ function runGh(args: string[]): string {
   return result.stdout
 }
 
+function sleepSync(ms: number): void {
+  const arr = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(arr, 0, 0, ms)
+}
+
+function isRetryableGhApiError(message: string): boolean {
+  const text = message.toLowerCase()
+  return (
+    text.includes("http 500") ||
+    text.includes("http 502") ||
+    text.includes("http 503") ||
+    text.includes("http 504") ||
+    text.includes("bad gateway") ||
+    text.includes("service unavailable") ||
+    text.includes("gateway timeout")
+  )
+}
+
 function getDefaultAuthor(): string {
   return runGh(["api", "user", "--jq", ".login"]).trim()
 }
@@ -164,7 +182,24 @@ function fetchRecords(author: string, sinceDay: string): { records: CommitRecord
   }).toString()
 
   const endpoint = `/search/commits?${search}`
-  const raw = runGh(["api", "--paginate", "--slurp", "-H", ACCEPT_HEADER, endpoint])
+  let raw = ""
+  let lastError = ""
+  const maxAttempts = 4
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      raw = runGh(["api", "--paginate", "--slurp", "-H", ACCEPT_HEADER, endpoint])
+      lastError = ""
+      break
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      if (attempt === maxAttempts || !isRetryableGhApiError(lastError)) {
+        throw new Error(lastError)
+      }
+      const backoffMs = 500 * 2 ** (attempt - 1)
+      sleepSync(backoffMs)
+    }
+  }
+
   const pages = JSON.parse(raw) as any[]
 
   const totalCountHint = pages?.[0]?.total_count
