@@ -1,12 +1,12 @@
 {
-  "name": "gh-activity-viz",
+  "name": "gh-viz",
   "version": "0.1.0",
   "private": true,
   "description": "GitHub CLI extension for commit activity visualizations with interactive TUI and grouped metrics",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "gh-activity-viz": "dist/cli.js"
+    "gh-viz": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

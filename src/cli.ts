@@ -685,7 +685,7 @@ async function runTui(options: RawOptions): Promise<number> {
     statusError: false,
   }
 
-  const screen = blessed.screen({ smartCSR: true, title: "gh activity-viz" })
+  const screen = blessed.screen({ smartCSR: true, title: "gh viz" })
   const prompt = blessed.prompt({
     parent: screen,
     border: "line",
@@ -870,7 +870,7 @@ async function runTui(options: RawOptions): Promise<number> {
     }
 
     if (index === 12) {
-      const path = await askInTui("Export markdown path", "activity-viz.md")
+      const path = await askInTui("Export markdown path", "gh-viz.md")
       if (!path) {
         setStatus(state, "Export canceled.")
         return
@@ -947,7 +947,7 @@ async function runTui(options: RawOptions): Promise<number> {
       }
     }
 
-    const title = "gh activity-viz TUI | Tab switch pane | Enter apply/open | Esc clear filter | q quit"
+    const title = "gh viz TUI | Tab switch pane | Enter apply/open | Esc clear filter | q quit"
     header.setContent(ellipsize(title, Math.max(10, screen.width as number)))
 
     summary.setContent(
@@ -1060,7 +1060,7 @@ function buildProgram(): Command {
   }
 
   const program = new Command()
-    .name("gh activity-viz")
+    .name("gh viz")
     .description("Visualize authored Git commit history via gh API with filters")
     .option("--author <login>", "GitHub login to analyze (default: authenticated user)")
     .option("--mode <mode>", "Mode: auto, text, or tui", "auto")

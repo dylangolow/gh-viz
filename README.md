@@ -1,8 +1,8 @@
-# gh-activity-viz (`gh activity-viz`)
+# gh-viz (`gh viz`)
 
 Terminal commit activity explorer for GitHub CLI.
 
-`gh-activity-viz` uses your existing `gh` auth/session and supports:
+`gh-viz` uses your existing `gh` auth/session and supports:
 
 - interactive TUI commit browsing with keyboard filters
 - readable terminal table output (width-aware)
@@ -17,27 +17,27 @@ No AI summarization is included. This focuses on commit history and grouped metr
 Install directly from GitHub:
 
 ```bash
-gh extension install dylangolow/gh-activity-viz
+gh extension install dylangolow/gh-viz
 ```
 
 If already installed:
 
 ```bash
-gh extension upgrade activity-viz
+gh extension upgrade viz
 ```
 
 Install from local checkout (for development):
 
 ```bash
-git clone git@github.com:dylangolow/gh-activity-viz.git
-cd gh-activity-viz
+git clone git@github.com:dylangolow/gh-viz.git
+cd gh-viz
 gh extension install .
 ```
 
 ## Run
 
 ```bash
-gh activity-viz
+gh viz
 ```
 
 If you run without args in an interactive terminal, startup prompts you for:
@@ -93,25 +93,25 @@ If you run without args in an interactive terminal, startup prompts you for:
 Start interactive mode selector (`TUI` / `Guided text` / `Text defaults`):
 
 ```bash
-gh activity-viz
+gh viz
 ```
 
 Open straight into TUI:
 
 ```bash
-gh activity-viz --mode tui
+gh viz --mode tui
 ```
 
 Table output for terminal:
 
 ```bash
-gh activity-viz --mode text --days-summary 7 --days-chart 28 --format table
+gh viz --mode text --days-summary 7 --days-chart 28 --format table
 ```
 
 Markdown report to file:
 
 ```bash
-gh activity-viz \
+gh viz \
   --author dylangolow \
   --days-summary 7 \
   --days-chart 28 \
@@ -123,19 +123,19 @@ gh activity-viz \
 JSON for downstream tooling:
 
 ```bash
-gh activity-viz --group-by repo --public-only --exclude-merges --format json
+gh viz --group-by repo --public-only --exclude-merges --format json
 ```
 
 Filter to specific orgs:
 
 ```bash
-gh activity-viz --include-org dylangolow,Conduit-BTC --group-by both
+gh viz --include-org dylangolow,Conduit-BTC --group-by both
 ```
 
 Filter to a specific repo and date window:
 
 ```bash
-gh activity-viz \
+gh viz \
   --include-repo inklingdevelopers/inkling \
   --end-date 2026-03-04 \
   --days-summary 14 \
