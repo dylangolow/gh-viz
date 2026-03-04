@@ -17,7 +17,20 @@ if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
   fi
 fi
 
+NEEDS_BUILD=0
 if [[ ! -f "${SCRIPT_DIR}/dist/cli.js" ]]; then
+  NEEDS_BUILD=1
+elif [[ "${SCRIPT_DIR}/src/cli.ts" -nt "${SCRIPT_DIR}/dist/cli.js" ]]; then
+  NEEDS_BUILD=1
+elif [[ "${SCRIPT_DIR}/package.json" -nt "${SCRIPT_DIR}/dist/cli.js" ]]; then
+  NEEDS_BUILD=1
+elif [[ "${SCRIPT_DIR}/tsconfig.json" -nt "${SCRIPT_DIR}/dist/cli.js" ]]; then
+  NEEDS_BUILD=1
+elif [[ -f "${SCRIPT_DIR}/pnpm-lock.yaml" && "${SCRIPT_DIR}/pnpm-lock.yaml" -nt "${SCRIPT_DIR}/dist/cli.js" ]]; then
+  NEEDS_BUILD=1
+fi
+
+if [[ "${NEEDS_BUILD}" -eq 1 ]]; then
   echo "Building TypeScript sources..."
   if [[ "${PKG_MGR}" == "pnpm" ]]; then
     pnpm --dir "${SCRIPT_DIR}" build

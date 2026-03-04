@@ -9,6 +9,9 @@ import * as readlineCore from "node:readline"
 import readline from "node:readline/promises"
 
 const ACCEPT_HEADER = "Accept: application/vnd.github.cloak-preview+json"
+const FETCH_PAGE_SIZE = 100
+const FETCH_MAX_PAGES = 10
+const FETCH_MAX_RECORDS_DEFAULT = 1000
 
 type GroupBy = "org" | "repo" | "both"
 type Mode = "auto" | "text" | "tui"
@@ -66,6 +69,13 @@ interface ActivityView {
   chartRecords: CommitRecord[]
   orgRows: OrgSummary[]
   repoRows: RepoSummary[]
+}
+
+interface FetchResult {
+  records: CommitRecord[]
+  totalCountHint?: number
+  truncated: boolean
+  maxRecords: number
 }
 
 interface TuiState {
@@ -138,6 +148,23 @@ function isRetryableGhApiError(message: string): boolean {
   )
 }
 
+function runGhWithRetry(args: string[], maxAttempts = 4): string {
+  let lastError = ""
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return runGh(args)
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      if (attempt === maxAttempts || !isRetryableGhApiError(lastError)) {
+        throw new Error(lastError)
+      }
+      const backoffMs = 500 * 2 ** (attempt - 1)
+      sleepSync(backoffMs)
+    }
+  }
+  throw new Error(lastError || "unknown gh api error")
+}
+
 function getDefaultAuthor(): string {
   return runGh(["api", "user", "--jq", ".login"]).trim()
 }
@@ -183,52 +210,61 @@ function buildRecord(item: any): CommitRecord {
   }
 }
 
-function fetchRecords(author: string, sinceDay: string): { records: CommitRecord[]; totalCountHint?: number } {
+function resolveMaxFetchRecords(): number {
+  const raw = process.env.GH_VIZ_MAX_COMMITS?.trim()
+  if (!raw) return FETCH_MAX_RECORDS_DEFAULT
+  const parsed = Number(raw)
+  if (Number.isInteger(parsed) && parsed >= 1) {
+    return Math.min(parsed, FETCH_MAX_PAGES * FETCH_PAGE_SIZE)
+  }
+  return FETCH_MAX_RECORDS_DEFAULT
+}
+
+function fetchRecords(author: string, sinceDay: string): FetchResult {
+  const maxRecords = resolveMaxFetchRecords()
+  const perPage = Math.max(1, Math.min(FETCH_PAGE_SIZE, maxRecords))
+  const maxPages = Math.max(1, Math.min(FETCH_MAX_PAGES, Math.ceil(maxRecords / perPage)))
+
   const search = new URLSearchParams({
     q: `author:${author} author-date:>=${sinceDay}`,
     sort: "author-date",
     order: "desc",
-    per_page: "100",
+    per_page: String(perPage),
   }).toString()
 
   const endpoint = `/search/commits?${search}`
-  let raw = ""
-  let lastError = ""
-  const maxAttempts = 4
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      raw = runGh(["api", "--paginate", "--slurp", "-H", ACCEPT_HEADER, endpoint])
-      lastError = ""
-      break
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error)
-      if (attempt === maxAttempts || !isRetryableGhApiError(lastError)) {
-        throw new Error(lastError)
-      }
-      const backoffMs = 500 * 2 ** (attempt - 1)
-      sleepSync(backoffMs)
-    }
-  }
-
-  const pages = JSON.parse(raw) as any[]
-
-  const totalCountHint = pages?.[0]?.total_count
-    ? Number(pages[0].total_count)
-    : undefined
 
   const seen = new Set<string>()
   const records: CommitRecord[] = []
+  let totalCountHint: number | undefined = undefined
 
-  for (const page of pages) {
-    for (const item of page?.items ?? []) {
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+    const pageEndpoint = `${endpoint}&page=${pageNumber}`
+    const raw = runGhWithRetry(["api", "-H", ACCEPT_HEADER, pageEndpoint])
+    const page = JSON.parse(raw) as any
+
+    if (pageNumber === 1 && page?.total_count) {
+      totalCountHint = Number(page.total_count)
+    }
+
+    const items = Array.isArray(page?.items) ? page.items : []
+    if (items.length === 0) break
+
+    for (const item of items) {
       const sha = String(item?.sha || "")
       if (!sha || seen.has(sha)) continue
       seen.add(sha)
       records.push(buildRecord(item))
+      if (records.length >= maxRecords) {
+        return { records, totalCountHint, truncated: true, maxRecords }
+      }
     }
+
+    if (items.length < perPage) break
   }
 
-  return { records, totalCountHint }
+  const truncated = (totalCountHint ?? 0) > records.length && records.length >= maxRecords
+  return { records, totalCountHint, truncated, maxRecords }
 }
 
 function inRange(day: string, startDay: string, endDay: string): boolean {
@@ -1148,11 +1184,14 @@ function ensureTuiData(state: TuiState): void {
     return
   }
 
-  const { records, totalCountHint } = fetchRecords(state.author, neededSince)
+  const { records, totalCountHint, truncated, maxRecords } = fetchRecords(state.author, neededSince)
   state.records = records
   state.totalCountHint = totalCountHint
   state.fetchedSince = neededSince
-  setStatus(state, `Loaded ${records.length} commits for @${state.author} since ${neededSince}.`)
+  setStatus(
+    state,
+    `Loaded ${records.length} commits for @${state.author} since ${neededSince}${truncated ? ` (capped at ${maxRecords})` : ""}.`,
+  )
 }
 
 async function runTui(options: RawOptions): Promise<number> {
@@ -1275,12 +1314,15 @@ async function runTui(options: RawOptions): Promise<number> {
     state.isFetching = true
     try {
       setStatus(state, `Fetching @${state.author} since ${neededSince}...`)
-      const { records, totalCountHint } = fetchRecords(state.author, neededSince)
+      const { records, totalCountHint, truncated, maxRecords } = fetchRecords(state.author, neededSince)
       state.records = records
       state.totalCountHint = totalCountHint
       state.fetchedSince = neededSince
       state.hasFetched = true
-      setStatus(state, `Loaded ${records.length} commits for @${state.author} since ${neededSince}.`)
+      setStatus(
+        state,
+        `Loaded ${records.length} commits for @${state.author} since ${neededSince}${truncated ? ` (capped at ${maxRecords})` : ""}.`,
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       appendTuiLog(logPath, `fetch failed: ${message}`)

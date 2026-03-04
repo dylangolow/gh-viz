@@ -119,6 +119,7 @@ TUI color cues:
 TUI diagnostics:
 - default log file: `/tmp/gh-viz-tui.log`
 - override log path: `GH_VIZ_TUI_LOG=/path/to/log gh viz --mode tui`
+- cap fetched commits (to reduce memory/load): `GH_VIZ_MAX_COMMITS=400 gh viz --mode tui`
 
 ## Examples
 
