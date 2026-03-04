@@ -95,6 +95,7 @@ After text output completes in interactive startup mode, a next-action menu appe
 - `Up/Down` or `j/k`: move in focused pane
 - `Tab`: switch focus between commits and filters
 - `u`: apply/refetch data for current filters
+- `p`: print current table view to stdout and exit TUI
 - `Enter`:
   - commits pane: select commit (status/details update)
   - filters pane: apply/edit selected filter
@@ -113,6 +114,10 @@ TUI color cues:
 - selected rows are color-highlighted as you move
 - filter toggles show `ON` in green and `OFF` in red
 - commit rows include per-day intensity color markers (`·░▒▓█`)
+
+TUI diagnostics:
+- default log file: `/tmp/gh-viz-tui.log`
+- override log path: `GH_VIZ_TUI_LOG=/path/to/log gh viz --mode tui`
 
 ## Examples
 
