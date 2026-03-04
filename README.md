@@ -1,53 +1,95 @@
-# gh-activity-viz
+# gh-activity-viz (`gh activity-viz`)
 
-`gh-activity-viz` is a GitHub CLI extension that visualizes authored commit history with:
+Terminal commit activity explorer for GitHub CLI.
 
-- 7-day heat row
-- 4-week mini heatstamp (28 days by default)
-- 28-day daily bar chart
-- grouped counts by org and/or repo
-- filters for org/repo/public-only/merge exclusion
+`gh-activity-viz` uses your existing `gh` auth/session and supports:
 
-No AI-style feature summarization is included. Output is grouped metrics + visuals.
+- interactive TUI commit browsing with keyboard filters
+- readable terminal table output (width-aware)
+- markdown and JSON exports
+- grouping by org, repo, or both
+- org/repo include and exclude filters
+
+No AI summarization is included. This focuses on commit history and grouped metrics.
 
 ## Install
 
-From local path:
+From local checkout:
 
 ```bash
-gh extension install /Users/dylangolow/workspace/dylangolow/gh-activity-viz
+cd /Users/dylangolow/workspace/dylangolow/gh-activity-viz
+gh extension install .
 ```
 
-Then run as:
+If already installed:
 
 ```bash
-gh activity-viz --author dylangolow
+gh extension upgrade activity-viz
 ```
 
-## Usage
+## Run
 
 ```bash
-gh activity-viz [options]
+gh activity-viz
 ```
 
-Key options:
+If you run without args in an interactive terminal, startup prompts you for:
 
-- `--author <login>`: GitHub user to analyze (default: authenticated user)
-- `--days-summary <N>`: summary/grouping window (default `7`)
-- `--days-chart <N>`: chart window (default `28`)
+1. `TUI`
+2. `Guided text output`
+3. `Text output (defaults)`
+
+## What You Get
+
+- summary window totals (commits, non-merge, repos, orgs)
+- grouped org table
+- grouped repo table
+- markdown visuals:
+  - 7-day heat row
+  - 4-week mini heatstamp (28 days by default)
+  - daily bar chart
+- TUI panes:
+  - commit list
+  - filter editor
+  - selected commit details
+
+## Options
+
+- `--author <login>`: GitHub user to analyze (default: current `gh` user)
+- `--mode <auto|text|tui>`: run mode (default `auto`)
+- `--days-summary <n>`: summary/grouping window days (default `7`)
+- `--days-chart <n>`: chart window days (default `28`)
 - `--end-date YYYY-MM-DD`: end date in UTC
-- `--group-by org|repo|both`: choose grouped sections (default `both`)
-- `--include-org a,b` / `--exclude-org a,b`
-- `--include-repo owner/name` / `--exclude-repo owner/name`
+- `--group-by <org|repo|both>`: summary grouping (default `both`)
+- `--include-org <a,b>` and `--exclude-org <a,b>`
+- `--include-repo <owner/name>` and `--exclude-repo <owner/name>`
 - `--public-only`: hide private repos
-- `--exclude-merges`: drop merge commits entirely
-- `--top-repos <N>`: max repos in repo table (default `20`)
-- `--format markdown|table|json`
-- `--output <path>`
+- `--exclude-merges`: remove merge commits
+- `--top-repos <n>`: repo rows to keep (default `20`)
+- `--format <auto|table|markdown|json>`
+- `--output <path>`: write to file instead of stdout
+
+## TUI Keys
+
+- `Up/Down` or `j/k`: move in focused pane
+- `Tab`: switch focus between commits and filters
+- `Enter`:
+  - commits pane: open selected commit in browser
+  - filters pane: apply/edit selected filter
+- `Esc` (filters pane): clear selected filter
+- `o`: open selected commit in browser
+- `r`: reset all filters
+- `q`: quit
 
 ## Examples
 
-Markdown report file:
+Table output for terminal:
+
+```bash
+gh activity-viz --mode text --format table
+```
+
+Markdown report to file:
 
 ```bash
 gh activity-viz \
@@ -59,10 +101,10 @@ gh activity-viz \
   --output context/github_activity.md
 ```
 
-Repo-only grouping, table output:
+JSON for downstream tooling:
 
 ```bash
-gh activity-viz --group-by repo --format table
+gh activity-viz --group-by repo --public-only --exclude-merges --format json
 ```
 
 Filter to specific orgs:
@@ -71,14 +113,8 @@ Filter to specific orgs:
 gh activity-viz --include-org dylangolow,Conduit-BTC --group-by both
 ```
 
-Public repos only, non-merge commits only:
-
-```bash
-gh activity-viz --public-only --exclude-merges --format json
-```
-
 ## Notes
 
-- Uses `gh api /search/commits` with the commit-search preview header.
-- GitHub commit search may cap results near 1000 items for broad queries.
-- For very high-volume windows, narrow by `--include-org`, `--include-repo`, or shorter date ranges.
+- Data source: `gh api /search/commits` using the commit search preview header.
+- GitHub commit search can cap broad queries around 1000 results.
+- For high-volume windows, narrow with `--include-org`, `--include-repo`, or shorter day ranges.
