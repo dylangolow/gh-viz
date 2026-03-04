@@ -1,0 +1,610 @@
+#!/usr/bin/env python3
+"""gh-activity-viz
+
+GitHub CLI extension to summarize authored commit activity and render
+visual charts (heat row, heatstamp, bars) with org/repo filters.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import urllib.parse
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Iterable
+
+ACCEPT_HEADER = "Accept: application/vnd.github.cloak-preview+json"
+
+
+@dataclass
+class Record:
+    sha: str
+    day: str
+    date_time: str
+    repo: str
+    org: str
+    is_private: bool
+    subject: str
+    is_merge: bool
+
+
+def run_gh(args: list[str]) -> str:
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown gh error"
+        raise RuntimeError(detail)
+    return proc.stdout
+
+
+def get_default_author() -> str:
+    return run_gh(["api", "user", "--jq", ".login"]).strip()
+
+
+def split_values(raw_values: list[str]) -> set[str]:
+    values: set[str] = set()
+    for value in raw_values:
+        for part in value.split(","):
+            trimmed = part.strip()
+            if trimmed:
+                values.add(trimmed)
+    return values
+
+
+def build_record(item: dict) -> Record:
+    subject = item["commit"]["message"].splitlines()[0]
+    is_merge = subject.startswith("Merge pull request") or subject.startswith("Merge branch")
+
+    dt = item["commit"]["author"]["date"]
+    day = dt[:10]
+
+    repo_obj = item["repository"]
+    return Record(
+        sha=item["sha"],
+        day=day,
+        date_time=dt,
+        repo=repo_obj["full_name"],
+        org=repo_obj["owner"]["login"],
+        is_private=bool(repo_obj.get("private", False)),
+        subject=subject,
+        is_merge=is_merge,
+    )
+
+
+def fetch_records(author: str, since_day: str) -> tuple[list[Record], int | None]:
+    query = f"author:{author} author-date:>={since_day}"
+    endpoint = (
+        "/search/commits?"
+        + urllib.parse.urlencode(
+            {
+                "q": query,
+                "sort": "author-date",
+                "order": "desc",
+                "per_page": "100",
+            }
+        )
+    )
+
+    raw = run_gh(["api", "--paginate", "--slurp", "-H", ACCEPT_HEADER, endpoint])
+    pages = json.loads(raw)
+
+    total_count: int | None = None
+    if pages and isinstance(pages[0], dict) and "total_count" in pages[0]:
+        total_count = int(pages[0]["total_count"])
+
+    seen: set[str] = set()
+    records: list[Record] = []
+    for page in pages:
+        for item in page.get("items", []):
+            sha = item.get("sha")
+            if not sha or sha in seen:
+                continue
+            seen.add(sha)
+            records.append(build_record(item))
+
+    return records, total_count
+
+
+def in_range(day: str, start_day: str, end_day: str) -> bool:
+    return start_day <= day <= end_day
+
+
+def filter_records(
+    records: Iterable[Record],
+    include_orgs: set[str],
+    exclude_orgs: set[str],
+    include_repos: set[str],
+    exclude_repos: set[str],
+    public_only: bool,
+    exclude_merges: bool,
+) -> list[Record]:
+    result: list[Record] = []
+    for r in records:
+        if include_orgs and r.org not in include_orgs:
+            continue
+        if exclude_orgs and r.org in exclude_orgs:
+            continue
+        if include_repos and r.repo not in include_repos:
+            continue
+        if exclude_repos and r.repo in exclude_repos:
+            continue
+        if public_only and r.is_private:
+            continue
+        if exclude_merges and r.is_merge:
+            continue
+        result.append(r)
+    return result
+
+
+def date_range(start: date, end: date) -> list[date]:
+    current = start
+    out: list[date] = []
+    while current <= end:
+        out.append(current)
+        current += timedelta(days=1)
+    return out
+
+
+def intensity_symbol(count: int) -> str:
+    if count == 0:
+        return "·"
+    if count <= 4:
+        return "░"
+    if count <= 19:
+        return "▒"
+    if count <= 59:
+        return "▓"
+    return "█"
+
+
+def render_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt(row: list[str]) -> str:
+        return " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+
+    sep = "-+-".join("-" * w for w in widths)
+    lines = [fmt(headers), sep]
+    lines.extend(fmt(r) for r in rows)
+    return "\n".join(lines)
+
+
+def summarize_by_org(records: list[Record]) -> list[dict]:
+    grouped: dict[str, list[Record]] = defaultdict(list)
+    for r in records:
+        grouped[r.org].append(r)
+
+    rows = []
+    for org, items in grouped.items():
+        rows.append(
+            {
+                "org": org,
+                "commits": len(items),
+                "non_merge": sum(1 for i in items if not i.is_merge),
+                "repos": len({i.repo for i in items}),
+            }
+        )
+
+    rows.sort(key=lambda x: (-x["commits"], x["org"]))
+    return rows
+
+
+def summarize_by_repo(records: list[Record]) -> list[dict]:
+    grouped: dict[str, list[Record]] = defaultdict(list)
+    for r in records:
+        grouped[r.repo].append(r)
+
+    rows = []
+    for repo, items in grouped.items():
+        rows.append(
+            {
+                "repo": repo,
+                "org": items[0].org,
+                "commits": len(items),
+                "non_merge": sum(1 for i in items if not i.is_merge),
+            }
+        )
+
+    rows.sort(key=lambda x: (-x["commits"], x["repo"]))
+    return rows
+
+
+def build_markdown(
+    *,
+    author: str,
+    generated_at: str,
+    summary_start_day: str,
+    summary_end_day: str,
+    chart_start_day: str,
+    chart_end_day: str,
+    chart_records: list[Record],
+    summary_records: list[Record],
+    org_rows: list[dict],
+    repo_rows: list[dict],
+    top_repos: int,
+    heat_days: int,
+    chart_days: int,
+    include_org_group: bool,
+    include_repo_group: bool,
+    total_count_hint: int | None,
+) -> str:
+    # Daily counts for chart window.
+    chart_counter = Counter(r.day for r in chart_records if in_range(r.day, chart_start_day, chart_end_day))
+    chart_start = datetime.strptime(chart_start_day, "%Y-%m-%d").date()
+    chart_end = datetime.strptime(chart_end_day, "%Y-%m-%d").date()
+    chart_dates = date_range(chart_start, chart_end)
+
+    # 7-day heat row from tail of summary window.
+    summary_end = datetime.strptime(summary_end_day, "%Y-%m-%d").date()
+    heat_start = summary_end - timedelta(days=heat_days - 1)
+    heat_dates = date_range(heat_start, summary_end)
+
+    daily_lines = [
+        f"- `{d.isoformat()}`: {chart_counter.get(d.isoformat(), 0)}"
+        for d in heat_dates
+    ]
+
+    heat_header = " | ".join(d.strftime("%m-%d") for d in heat_dates)
+    heat_cells = " | ".join(
+        f"`{intensity_symbol(chart_counter.get(d.isoformat(), 0))}`" for d in heat_dates
+    )
+
+    # Heatstamp rows in sequential 7-day chunks across chart window.
+    week_chunks: list[list[date]] = []
+    for i in range(0, len(chart_dates), 7):
+        week_chunks.append(chart_dates[i : i + 7])
+
+    weekday_header_dates = week_chunks[0] if week_chunks else []
+    weekday_headers = [d.strftime("%a") for d in weekday_header_dates]
+
+    heatstamp_rows = []
+    for i, chunk in enumerate(week_chunks, start=1):
+        label = f"W{i} ({chunk[0].strftime('%m-%d')}..{chunk[-1].strftime('%m-%d')})"
+        cells = [f"`{intensity_symbol(chart_counter.get(d.isoformat(), 0))}`" for d in chunk]
+        while len(cells) < 7:
+            cells.append("` `")
+        heatstamp_rows.append((label, cells))
+
+    # Bar chart.
+    max_count = max((chart_counter.get(d.isoformat(), 0) for d in chart_dates), default=0)
+    bar_width = 24
+    bar_lines = []
+    for d in chart_dates:
+        count = chart_counter.get(d.isoformat(), 0)
+        if count == 0:
+            bar = "·"
+        else:
+            units = max(1, round((count / max_count) * bar_width)) if max_count else 1
+            bar = "█" * units
+        bar_lines.append(f"{d.isoformat()} | {count:>3} | {bar}")
+
+    org_table = "\n".join(
+        [
+            "| Org | Commits | Non-merge | Repos |",
+            "|---|---:|---:|---:|",
+            *[
+                f"| `{r['org']}` | {r['commits']} | {r['non_merge']} | {r['repos']} |"
+                for r in org_rows
+            ],
+        ]
+    )
+
+    repo_table = "\n".join(
+        [
+            "| Repo | Commits | Non-merge |",
+            "|---|---:|---:|",
+            *[
+                f"| `{r['repo']}` | {r['commits']} | {r['non_merge']} |"
+                for r in repo_rows[:top_repos]
+            ],
+        ]
+    )
+
+    total_commits = len(summary_records)
+    total_non_merge = sum(1 for r in summary_records if not r.is_merge)
+    total_repos = len({r.repo for r in summary_records})
+    total_orgs = len({r.org for r in summary_records})
+
+    truncated_note = ""
+    if total_count_hint is not None and total_count_hint >= 1000:
+        truncated_note = (
+            "\n> Warning: GitHub commit search may cap results at 1000 for this query. "
+            "Consider narrowing date range or filtering by org/repo.\n"
+        )
+
+    weekday_head = " | ".join(["Week", *weekday_headers])
+    weekday_sep = " | ".join(["---"] * (len(weekday_headers) + 1))
+    heatstamp_lines = [f"| {weekday_head} |", f"| {weekday_sep} |"]
+    for label, cells in heatstamp_rows:
+        heatstamp_lines.append(f"| {label} | {' | '.join(cells)} |")
+
+    grouped_sections: list[str] = []
+    if include_org_group:
+        grouped_sections.extend(
+            [
+                f"## By Org ({summary_start_day} → {summary_end_day})",
+                "",
+                org_table,
+                "",
+            ]
+        )
+    if include_repo_group:
+        grouped_sections.extend(
+            [
+                f"## By Project (Top {top_repos}, {summary_start_day} → {summary_end_day})",
+                "",
+                repo_table,
+                "",
+            ]
+        )
+
+    return "\n".join(
+        [
+            f"# GitHub Activity Summary ({summary_start_day} to {summary_end_day})",
+            "",
+            f"- Report generated: {generated_at}",
+            f"- Author: `{author}`",
+            "- Source: `gh api /search/commits` (authored commits)",
+            f"- Summary window (org/repo tables): `{summary_start_day}` → `{summary_end_day}`",
+            "- Chart windows:",
+            f"  - Heat row: `{heat_dates[0].isoformat()}` → `{heat_dates[-1].isoformat()}`",
+            f"  - Heatstamp + bar chart: `{chart_start_day}` → `{chart_end_day}`",
+            "",
+            "## Totals",
+            "",
+            f"- Authored commits found (summary window): **{total_commits}**",
+            f"- Non-merge commits (summary window): **{total_non_merge}**",
+            f"- Unique repos (summary window): **{total_repos}**",
+            f"- Orgs (summary window): **{total_orgs}**",
+            truncated_note,
+            "## Visuals",
+            "",
+            "Daily commit counts in heat-row window:",
+            "",
+            *daily_lines,
+            "",
+            "Intensity buckets:",
+            "",
+            "- `·` = 0",
+            "- `░` = 1-4",
+            "- `▒` = 5-19",
+            "- `▓` = 20-59",
+            "- `█` = 60+",
+            "",
+            "Heat row:",
+            "",
+            f"| {heat_header} |",
+            f"| {' | '.join(['---'] * len(heat_dates))} |",
+            f"| {heat_cells} |",
+            "",
+            f"Mini heatstamp ({chart_days}-day window):",
+            "",
+            *heatstamp_lines,
+            "",
+            f"Bar chart ({chart_days}-day window, scaled to max day = {max_count}):",
+            "",
+            "```text",
+            *bar_lines,
+            "```",
+            "",
+            *grouped_sections,
+        ]
+    )
+
+
+def build_table_output(
+    *,
+    author: str,
+    summary_start_day: str,
+    summary_end_day: str,
+    summary_records: list[Record],
+    org_rows: list[dict],
+    repo_rows: list[dict],
+    top_repos: int,
+    include_org_group: bool,
+    include_repo_group: bool,
+) -> str:
+    lines = []
+    lines.append(f"Author: {author}")
+    lines.append(f"Summary window: {summary_start_day} -> {summary_end_day}")
+    lines.append("")
+    lines.append(
+        f"Totals: commits={len(summary_records)}, non_merge={sum(1 for r in summary_records if not r.is_merge)}, repos={len({r.repo for r in summary_records})}, orgs={len({r.org for r in summary_records})}"
+    )
+    lines.append("")
+
+    if include_org_group:
+        org_table = render_table(
+            ["Org", "Commits", "Non-merge", "Repos"],
+            [[r["org"], str(r["commits"]), str(r["non_merge"]), str(r["repos"])] for r in org_rows],
+        )
+        lines.append("By Org")
+        lines.append(org_table)
+        lines.append("")
+
+    if include_repo_group:
+        repo_table = render_table(
+            ["Repo", "Commits", "Non-merge"],
+            [
+                [r["repo"], str(r["commits"]), str(r["non_merge"])]
+                for r in repo_rows[:top_repos]
+            ],
+        )
+        lines.append(f"By Project (Top {top_repos})")
+        lines.append(repo_table)
+
+    return "\n".join(lines) + "\n"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="gh activity-viz",
+        description="Visualize authored Git commit history via gh API with filters.",
+    )
+    parser.add_argument("--author", help="GitHub login to analyze (default: authenticated user)")
+    parser.add_argument("--days-summary", type=int, default=7, help="Summary window in days")
+    parser.add_argument("--days-chart", type=int, default=28, help="Chart window in days")
+    parser.add_argument("--end-date", help="End date (UTC) in YYYY-MM-DD; default is today UTC")
+
+    parser.add_argument("--include-org", action="append", default=[], help="Include org(s), comma-separated or repeat")
+    parser.add_argument("--exclude-org", action="append", default=[], help="Exclude org(s), comma-separated or repeat")
+    parser.add_argument("--include-repo", action="append", default=[], help="Include repo(s) as owner/name, comma-separated or repeat")
+    parser.add_argument("--exclude-repo", action="append", default=[], help="Exclude repo(s) as owner/name, comma-separated or repeat")
+
+    parser.add_argument("--public-only", action="store_true", help="Exclude private repos from analysis")
+    parser.add_argument("--exclude-merges", action="store_true", help="Exclude merge commits from all counts/charts")
+    parser.add_argument("--top-repos", type=int, default=20, help="Number of repos to show in repo summary")
+    parser.add_argument(
+        "--group-by",
+        choices=["org", "repo", "both"],
+        default="both",
+        help="Show grouped summary by org, repo, or both",
+    )
+
+    parser.add_argument("--format", choices=["markdown", "table", "json"], default="markdown", help="Output format")
+    parser.add_argument("-o", "--output", help="Write output to file instead of stdout")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if args.days_summary <= 0:
+        print("--days-summary must be > 0", file=sys.stderr)
+        return 2
+    if args.days_chart <= 0:
+        print("--days-chart must be > 0", file=sys.stderr)
+        return 2
+
+    if args.end_date:
+        try:
+            end = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+        except ValueError:
+            print("--end-date must be YYYY-MM-DD", file=sys.stderr)
+            return 2
+    else:
+        end = datetime.now(timezone.utc).date()
+
+    summary_start = end - timedelta(days=args.days_summary - 1)
+    chart_start = end - timedelta(days=args.days_chart - 1)
+    fetch_start = min(summary_start, chart_start)
+
+    try:
+        author = args.author or get_default_author()
+        records, total_count_hint = fetch_records(author, fetch_start.isoformat())
+    except RuntimeError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    filtered = filter_records(
+        records,
+        include_orgs=split_values(args.include_org),
+        exclude_orgs=split_values(args.exclude_org),
+        include_repos=split_values(args.include_repo),
+        exclude_repos=split_values(args.exclude_repo),
+        public_only=args.public_only,
+        exclude_merges=args.exclude_merges,
+    )
+
+    summary_records = [
+        r
+        for r in filtered
+        if in_range(r.day, summary_start.isoformat(), end.isoformat())
+    ]
+    chart_records = [
+        r
+        for r in filtered
+        if in_range(r.day, chart_start.isoformat(), end.isoformat())
+    ]
+
+    org_rows = summarize_by_org(summary_records)
+    repo_rows = summarize_by_repo(summary_records)
+    include_org_group = args.group_by in ("org", "both")
+    include_repo_group = args.group_by in ("repo", "both")
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    if args.format == "json":
+        output_data = {
+            "generated_at": generated_at,
+            "author": author,
+            "summary_window": {
+                "start": summary_start.isoformat(),
+                "end": end.isoformat(),
+            },
+            "chart_window": {
+                "start": chart_start.isoformat(),
+                "end": end.isoformat(),
+            },
+            "filters": {
+                "include_org": sorted(split_values(args.include_org)),
+                "exclude_org": sorted(split_values(args.exclude_org)),
+                "include_repo": sorted(split_values(args.include_repo)),
+                "exclude_repo": sorted(split_values(args.exclude_repo)),
+                "public_only": args.public_only,
+                "exclude_merges": args.exclude_merges,
+            },
+            "totals": {
+                "commits": len(summary_records),
+                "non_merge": sum(1 for r in summary_records if not r.is_merge),
+                "repos": len({r.repo for r in summary_records}),
+                "orgs": len({r.org for r in summary_records}),
+            },
+            "group_by": args.group_by,
+            "search_total_count": total_count_hint,
+        }
+        if include_org_group:
+            output_data["org_summary"] = org_rows
+        if include_repo_group:
+            output_data["repo_summary"] = repo_rows[: args.top_repos]
+        rendered = json.dumps(output_data, indent=2) + "\n"
+    elif args.format == "table":
+        rendered = build_table_output(
+            author=author,
+            summary_start_day=summary_start.isoformat(),
+            summary_end_day=end.isoformat(),
+            summary_records=summary_records,
+            org_rows=org_rows,
+            repo_rows=repo_rows,
+            top_repos=args.top_repos,
+            include_org_group=include_org_group,
+            include_repo_group=include_repo_group,
+        )
+    else:
+        rendered = build_markdown(
+            author=author,
+            generated_at=generated_at,
+            summary_start_day=summary_start.isoformat(),
+            summary_end_day=end.isoformat(),
+            chart_start_day=chart_start.isoformat(),
+            chart_end_day=end.isoformat(),
+            chart_records=chart_records,
+            summary_records=summary_records,
+            org_rows=org_rows,
+            repo_rows=repo_rows,
+            top_repos=args.top_repos,
+            heat_days=min(7, args.days_summary),
+            chart_days=args.days_chart,
+            include_org_group=include_org_group,
+            include_repo_group=include_repo_group,
+            total_count_hint=total_count_hint,
+        )
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(rendered)
+        print(f"Wrote {args.output}")
+    else:
+        print(rendered, end="")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
