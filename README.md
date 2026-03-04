@@ -108,6 +108,7 @@ TUI fetch model:
 - filters do not auto-fetch on every move/edit
 - adjust filters first, then press `u` or run the `Refetch data` filter action
 - the `Refetch data` row shows `REQUIRED` when your current date window needs older data than what is cached
+- during fetch, an in-app loading overlay shows page progress and loaded commit count
 - this keeps navigation responsive and avoids fetch stalls while tuning
 
 TUI color cues:

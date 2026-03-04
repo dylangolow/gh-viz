@@ -78,6 +78,13 @@ interface FetchResult {
   maxRecords: number
 }
 
+interface FetchProgress {
+  page: number
+  maxPages: number
+  loadedRecords: number
+  totalCountHint?: number
+}
+
 interface TuiState {
   author: string
   endDate: Date
@@ -220,7 +227,11 @@ function resolveMaxFetchRecords(): number {
   return FETCH_MAX_RECORDS_DEFAULT
 }
 
-function fetchRecords(author: string, sinceDay: string): FetchResult {
+function fetchRecords(
+  author: string,
+  sinceDay: string,
+  onProgress?: (progress: FetchProgress) => void,
+): FetchResult {
   const maxRecords = resolveMaxFetchRecords()
   const perPage = Math.max(1, Math.min(FETCH_PAGE_SIZE, maxRecords))
   const maxPages = Math.max(1, Math.min(FETCH_MAX_PAGES, Math.ceil(maxRecords / perPage)))
@@ -256,9 +267,22 @@ function fetchRecords(author: string, sinceDay: string): FetchResult {
       seen.add(sha)
       records.push(buildRecord(item))
       if (records.length >= maxRecords) {
+        onProgress?.({
+          page: pageNumber,
+          maxPages,
+          loadedRecords: records.length,
+          totalCountHint,
+        })
         return { records, totalCountHint, truncated: true, maxRecords }
       }
     }
+
+    onProgress?.({
+      page: pageNumber,
+      maxPages,
+      loadedRecords: records.length,
+      totalCountHint,
+    })
 
     if (items.length < perPage) break
   }
@@ -1278,6 +1302,24 @@ async function runTui(options: RawOptions): Promise<number> {
     height: 1,
     content: "Keys: Up/Down move, Tab pane, Enter select/edit, u refetch, o open highlighted org/repo, Esc clear filter, p print+exit, r reset, q quit",
   })
+  const loading = blessed.box({
+    top: "center",
+    left: "center",
+    width: "64%",
+    height: 5,
+    tags: true,
+    border: "line",
+    hidden: true,
+    style: {
+      border: { fg: "yellow" },
+      bg: "black",
+      fg: "white",
+      bold: true,
+    },
+    align: "center",
+    valign: "middle",
+    content: "Fetching commits...",
+  })
 
   screen.append(header)
   screen.append(summary)
@@ -1287,6 +1329,7 @@ async function runTui(options: RawOptions): Promise<number> {
   screen.append(filtersList)
   screen.append(status)
   screen.append(help)
+  screen.append(loading)
 
   let focus: "preview" | "filters" = "filters"
   let currentView: ActivityView = {
@@ -1298,6 +1341,9 @@ async function runTui(options: RawOptions): Promise<number> {
     repoRows: [],
   }
   let previewTargets: Array<PreviewTarget | null> = []
+  let loadingMessage = ""
+  let loadingSpinnerIndex = 0
+  const loadingFrames = ["-", "\\", "|", "/"]
 
   const askInTui = (question: string, initial = ""): Promise<string | null> => {
     return new Promise(resolve => {
@@ -1312,9 +1358,22 @@ async function runTui(options: RawOptions): Promise<number> {
   const runFetch = (): void => {
     const neededSince = requiredFetchSince(state)
     state.isFetching = true
+    loadingMessage = `Fetching @${state.author} since ${neededSince}...`
+    loadingSpinnerIndex = 0
     try {
       setStatus(state, `Fetching @${state.author} since ${neededSince}...`)
-      const { records, totalCountHint, truncated, maxRecords } = fetchRecords(state.author, neededSince)
+      const { records, totalCountHint, truncated, maxRecords } = fetchRecords(
+        state.author,
+        neededSince,
+        progress => {
+          const frame = loadingFrames[loadingSpinnerIndex % loadingFrames.length]!
+          loadingSpinnerIndex += 1
+          const totalSuffix = progress.totalCountHint ? ` total≈${progress.totalCountHint}` : ""
+          loadingMessage = `${frame} Page ${progress.page}/${progress.maxPages} loaded=${progress.loadedRecords}${totalSuffix}`
+          setStatus(state, `Fetching @${state.author}: page ${progress.page}/${progress.maxPages}, loaded ${progress.loadedRecords} commits...`)
+          render()
+        },
+      )
       state.records = records
       state.totalCountHint = totalCountHint
       state.fetchedSince = neededSince
@@ -1329,6 +1388,7 @@ async function runTui(options: RawOptions): Promise<number> {
       setStatus(state, `Fetch failed: ${message}`, true)
     } finally {
       state.isFetching = false
+      loadingMessage = ""
     }
   }
 
@@ -1670,6 +1730,14 @@ async function runTui(options: RawOptions): Promise<number> {
       const statusText = state.status || "Ready."
       status.setContent(ellipsize(`Pane=${activePane} | ${statusText} | Intensity: ·░▒▓█`, Math.max(10, screen.width as number)))
       status.style = state.statusError ? { fg: "red" } : { fg: "white" }
+
+      if (state.isFetching) {
+        const message = loadingMessage || `Fetching @${state.author} since ${requiredFetchSince(state)}...`
+        loading.setContent(`{yellow-fg}Fetching{/}\n${escapeBlessedTags(message)}\nPlease wait...`)
+        loading.show()
+      } else {
+        loading.hide()
+      }
 
       if (focus === "preview") previewList.focus()
       if (focus === "filters") filtersList.focus()
