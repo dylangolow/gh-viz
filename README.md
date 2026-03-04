@@ -4,7 +4,7 @@ Terminal commit activity explorer for GitHub CLI.
 
 `gh-viz` uses your existing `gh` auth/session and supports:
 
-- interactive TUI commit browsing with keyboard filters
+- interactive TUI ranked activity preview with keyboard filters
 - readable terminal table output (width-aware)
 - markdown and JSON exports
 - post-output action loop for interactive text sessions
@@ -68,10 +68,10 @@ After text output completes in interactive startup mode, a next-action menu appe
   - 4-week mini heatstamp (28 days by default)
   - daily bar chart
 - TUI panes:
-  - commit list
+  - large ranked preview pane (orgs + repos by commit share)
   - filter editor
-  - 28-day preview strip above panes
-  - selected commit details
+  - 28-day intensity strip inside preview
+  - refetch freshness indicator (`REQUIRED` when window needs older data)
 
 ## Options
 
@@ -93,20 +93,21 @@ After text output completes in interactive startup mode, a next-action menu appe
 ## TUI Keys
 
 - `Up/Down` or `j/k`: move in focused pane
-- `Tab`: switch focus between commits and filters
+- `Tab`: switch focus between preview and filters
 - `u`: apply/refetch data for current filters
 - `p`: print current table view to stdout and exit TUI
 - `Enter`:
-  - commits pane: select commit (status/details update)
+  - preview pane: select highlighted org/repo row (then `o` to open)
   - filters pane: apply/edit selected filter
 - `Esc` (filters pane): clear selected filter
-- `o`: open selected commit in browser
+- `o`: open selected org/repo in browser
 - `r`: reset all filters
 - `q`: quit
 
 TUI fetch model:
 - filters do not auto-fetch on every move/edit
 - adjust filters first, then press `u` or run the `Refetch data` filter action
+- the `Refetch data` row shows `REQUIRED` when your current date window needs older data than what is cached
 - this keeps navigation responsive and avoids fetch stalls while tuning
 
 TUI color cues:

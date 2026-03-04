@@ -90,6 +90,16 @@ interface TuiState {
   statusError: boolean
 }
 
+interface PreviewTarget {
+  type: "org" | "repo"
+  slug: string
+}
+
+interface PreviewRows {
+  items: string[]
+  targets: Array<PreviewTarget | null>
+}
+
 function selectedIndex(list: blessed.Widgets.ListElement): number {
   const value = (list as blessed.Widgets.ListElement & { selected?: number }).selected
   return Math.max(0, value ?? 0)
@@ -997,7 +1007,13 @@ function colorizeFilterValue(label: string, value: string): string {
   if (label === "Public only" || label === "Exclude merges") {
     return value === "ON" ? "{green-fg}ON{/}" : "{red-fg}OFF{/}"
   }
-  if (label === "Refetch data" || label === "Save preset" || label === "Load preset" || label === "Reset filters" || label === "Export markdown") {
+  if (label === "Refetch data") {
+    if (value.startsWith("REQUIRED")) {
+      return "{red-fg}REQUIRED{/} {yellow-fg}Enter{/}"
+    }
+    return "{green-fg}Enter{/}"
+  }
+  if (label === "Save preset" || label === "Load preset" || label === "Reset filters" || label === "Export markdown") {
     return "{yellow-fg}Enter{/}"
   }
   if (value === "(none)") {
@@ -1007,6 +1023,7 @@ function colorizeFilterValue(label: string, value: string): string {
 }
 
 function filterRows(state: TuiState): Array<[string, string]> {
+  const refetchRequired = isRefetchRequired(state)
   return [
     ["Author", state.author],
     ["End date (UTC)", isoDateUTC(state.endDate)],
@@ -1020,7 +1037,7 @@ function filterRows(state: TuiState): Array<[string, string]> {
     ["Public only", state.publicOnly ? "ON" : "OFF"],
     ["Exclude merges", state.excludeMerges ? "ON" : "OFF"],
     ["Top repos", String(state.topRepos)],
-    ["Refetch data", "Enter"],
+    ["Refetch data", refetchRequired ? "REQUIRED (Enter)" : "Enter"],
     ["Save preset", "Enter"],
     ["Load preset", "Enter"],
     ["Reset filters", "Enter"],
@@ -1033,8 +1050,100 @@ function setStatus(state: TuiState, message: string, error = false): void {
   state.statusError = error
 }
 
+function requiredFetchSince(state: TuiState): string {
+  return isoDateUTC(addDays(state.endDate, -(Math.max(state.daysSummary, state.daysChart) - 1)))
+}
+
+function isRefetchRequired(state: TuiState): boolean {
+  if (!state.hasFetched) return true
+  if (!state.fetchedSince) return true
+  return requiredFetchSince(state) < state.fetchedSince
+}
+
+function setFilterChangedStatus(state: TuiState, message: string): void {
+  if (isRefetchRequired(state)) {
+    setStatus(state, `${message} Refetch required (press 'u').`)
+    return
+  }
+  setStatus(state, `${message} Preview updated from cached data.`)
+}
+
+function rankBar(count: number, maxCount: number, width = 12, color: "cyan" | "green" = "cyan"): string {
+  if (count <= 0 || maxCount <= 0) return ""
+  const filled = Math.max(1, Math.round((count / maxCount) * width))
+  return ` {${color}-fg}${"█".repeat(filled)}{/}`
+}
+
+function buildPreviewRows(state: TuiState, view: ActivityView): PreviewRows {
+  const items: string[] = []
+  const targets: Array<PreviewTarget | null> = []
+  const totalCommits = view.summaryRecords.length
+
+  const push = (line: string, target: PreviewTarget | null = null): void => {
+    items.push(line)
+    targets.push(target)
+  }
+
+  if (!state.hasFetched) {
+    push("{yellow-fg}No data loaded yet. Press 'u' to fetch.{/}")
+  } else if (isRefetchRequired(state)) {
+    push(`{red-fg}Current window needs older data. Refetch to include commits since ${requiredFetchSince(state)}.{/}`)
+  } else {
+    push(`{green-fg}Data is fresh for ${requiredFetchSince(state)} to ${isoDateUTC(state.endDate)}.{/}`)
+  }
+
+  if ((state.totalCountHint ?? 0) >= 1000) {
+    push("{yellow-fg}GitHub search may be capped around 1000 commits for broad queries.{/}")
+  }
+
+  const dayCounts = new Map<string, number>()
+  for (const record of view.chartRecords) {
+    dayCounts.set(record.day, (dayCounts.get(record.day) ?? 0) + 1)
+  }
+  const previewDays = 28
+  const previewStart = addDays(state.endDate, -(previewDays - 1))
+  const previewDates = dateRange(previewStart, state.endDate)
+  const previewSymbols = previewDates.map(d => intensityColoredSymbol(dayCounts.get(isoDateUTC(d)) ?? 0)).join("")
+
+  push("")
+  push(`{bold}28-day intensity{/} ${isoDateUTC(previewStart)}..${isoDateUTC(state.endDate)}`)
+  push(previewSymbols || "{gray-fg}(no chart data){/}")
+
+  push("")
+  push("{bold}Top orgs by commits{/}")
+  if (view.orgRows.length === 0) {
+    push("{gray-fg}(no org activity in summary window){/}")
+  } else {
+    const maxOrgCommits = view.orgRows[0]!.commits
+    view.orgRows.slice(0, 10).forEach((row, idx) => {
+      const pct = totalCommits > 0 ? ((row.commits / totalCommits) * 100).toFixed(1) : "0.0"
+      push(
+        `${String(idx + 1).padStart(2, " ")}. ${escapeBlessedTags(row.org)} {yellow-fg}${row.commits}{/}c {gray-fg}${pct}%{/} repos=${row.repos}${rankBar(row.commits, maxOrgCommits, 12, "cyan")}`,
+        { type: "org", slug: row.org },
+      )
+    })
+  }
+
+  push("")
+  push("{bold}Top repos by commits{/}")
+  if (view.repoRows.length === 0) {
+    push("{gray-fg}(no repo activity in summary window){/}")
+  } else {
+    const maxRepoCommits = view.repoRows[0]!.commits
+    view.repoRows.slice(0, Math.max(10, Math.min(state.topRepos, 16))).forEach((row, idx) => {
+      const pct = totalCommits > 0 ? ((row.commits / totalCommits) * 100).toFixed(1) : "0.0"
+      push(
+        `${String(idx + 1).padStart(2, " ")}. ${escapeBlessedTags(row.repo)} {yellow-fg}${row.commits}{/}c {gray-fg}${pct}%{/} non-merge=${row.nonMerge}${rankBar(row.commits, maxRepoCommits, 12, "green")}`,
+        { type: "repo", slug: row.repo },
+      )
+    })
+  }
+
+  return { items, targets }
+}
+
 function ensureTuiData(state: TuiState): void {
-  const neededSince = isoDateUTC(addDays(state.endDate, -(Math.max(state.daysSummary, state.daysChart) - 1)))
+  const neededSince = requiredFetchSince(state)
   if (state.records.length > 0 && state.fetchedSince && neededSince >= state.fetchedSince) {
     return
   }
@@ -1087,15 +1196,14 @@ async function runTui(options: RawOptions): Promise<number> {
 
   const header = blessed.box({ top: 0, left: 0, width: "100%", height: 1, tags: false, style: { bold: true } })
   const summary = blessed.box({ top: 1, left: 0, width: "100%", height: 1 })
-  const preview = blessed.box({ top: 2, left: 0, width: "100%", height: 1, tags: true })
-  const commitsLabel = blessed.box({ top: 3, left: 0, width: "66%", height: 1, content: "Commits (chart window)", style: { underline: true } })
-  const filtersLabel = blessed.box({ top: 3, left: "66%", width: "34%", height: 1, content: "Filters", style: { underline: true } })
+  const previewLabel = blessed.box({ top: 2, left: 0, width: "72%", height: 1, content: "Preview (ranked orgs + repos)", style: { underline: true } })
+  const filtersLabel = blessed.box({ top: 2, left: "72%", width: "28%", height: 1, content: "Filters", style: { underline: true } })
 
-  const commitsList = blessed.list({
-    top: 4,
+  const previewList = blessed.list({
+    top: 3,
     left: 0,
-    width: "66%",
-    bottom: 3,
+    width: "72%",
+    bottom: 2,
     keys: true,
     vi: true,
     mouse: true,
@@ -1103,15 +1211,15 @@ async function runTui(options: RawOptions): Promise<number> {
     border: "line",
     style: {
       border: { fg: "gray" },
-      selected: { bg: "blue", fg: "white", bold: true },
+      selected: { bg: "cyan", fg: "black", bold: true },
     },
   })
 
   const filtersList = blessed.list({
-    top: 4,
-    left: "66%",
-    width: "34%",
-    bottom: 3,
+    top: 3,
+    left: "72%",
+    width: "28%",
+    bottom: 2,
     keys: true,
     vi: true,
     mouse: true,
@@ -1123,28 +1231,25 @@ async function runTui(options: RawOptions): Promise<number> {
     },
   })
 
-  const detail = blessed.box({ top: "100%-3", left: 0, width: "100%", height: 1 })
   const status = blessed.box({ top: "100%-2", left: 0, width: "100%", height: 1 })
   const help = blessed.box({
     top: "100%-1",
     left: 0,
     width: "100%",
     height: 1,
-    content: "Keys: Up/Down move, Tab pane, Enter select, u fetch/apply, p print+exit, Esc clear, o open, r reset, q quit",
+    content: "Keys: Up/Down move, Tab pane, Enter select/edit, u refetch, o open highlighted org/repo, Esc clear filter, p print+exit, r reset, q quit",
   })
 
   screen.append(header)
   screen.append(summary)
-  screen.append(preview)
-  screen.append(commitsLabel)
+  screen.append(previewLabel)
   screen.append(filtersLabel)
-  screen.append(commitsList)
+  screen.append(previewList)
   screen.append(filtersList)
-  screen.append(detail)
   screen.append(status)
   screen.append(help)
 
-  let focus: "commits" | "filters" = "commits"
+  let focus: "preview" | "filters" = "filters"
   let currentView: ActivityView = {
     summaryStart: isoDateUTC(addDays(state.endDate, -(state.daysSummary - 1))),
     chartStart: isoDateUTC(addDays(state.endDate, -(state.daysChart - 1))),
@@ -1153,7 +1258,7 @@ async function runTui(options: RawOptions): Promise<number> {
     orgRows: [],
     repoRows: [],
   }
-  let visibleCommits: CommitRecord[] = []
+  let previewTargets: Array<PreviewTarget | null> = []
 
   const askInTui = (question: string, initial = ""): Promise<string | null> => {
     return new Promise(resolve => {
@@ -1166,7 +1271,7 @@ async function runTui(options: RawOptions): Promise<number> {
   }
 
   const runFetch = (): void => {
-    const neededSince = isoDateUTC(addDays(state.endDate, -(Math.max(state.daysSummary, state.daysChart) - 1)))
+    const neededSince = requiredFetchSince(state)
     state.isFetching = true
     try {
       setStatus(state, `Fetching @${state.author} since ${neededSince}...`)
@@ -1216,7 +1321,7 @@ async function runTui(options: RawOptions): Promise<number> {
           return
         }
       }
-      setStatus(state, "End date updated. Press 'u' to fetch.")
+      setFilterChangedStatus(state, "End date updated.")
       return
     }
 
@@ -1229,7 +1334,7 @@ async function runTui(options: RawOptions): Promise<number> {
         return
       }
       state.daysSummary = parsed
-      setStatus(state, "Summary days updated. Press 'u' to fetch.")
+      setFilterChangedStatus(state, "Summary days updated.")
       return
     }
 
@@ -1242,13 +1347,13 @@ async function runTui(options: RawOptions): Promise<number> {
         return
       }
       state.daysChart = parsed
-      setStatus(state, "Chart days updated. Press 'u' to fetch.")
+      setFilterChangedStatus(state, "Chart days updated.")
       return
     }
 
     if (index === 4) {
       state.groupBy = state.groupBy === "both" ? "org" : state.groupBy === "org" ? "repo" : "both"
-      setStatus(state, `Group by set to ${state.groupBy}.`)
+      setFilterChangedStatus(state, `Group by set to ${state.groupBy}.`)
       return
     }
 
@@ -1266,19 +1371,19 @@ async function runTui(options: RawOptions): Promise<number> {
       if (index === 6) state.excludeOrg = values
       if (index === 7) state.includeRepo = values
       if (index === 8) state.excludeRepo = values
-      setStatus(state, "Filter updated. Press 'u' to fetch.")
+      setFilterChangedStatus(state, "Filter updated.")
       return
     }
 
     if (index === 9) {
       state.publicOnly = !state.publicOnly
-      setStatus(state, `Public only ${state.publicOnly ? "ON" : "OFF"}. Press 'u' to fetch.`)
+      setFilterChangedStatus(state, `Public only ${state.publicOnly ? "ON" : "OFF"}.`)
       return
     }
 
     if (index === 10) {
       state.excludeMerges = !state.excludeMerges
-      setStatus(state, `Exclude merges ${state.excludeMerges ? "ON" : "OFF"}. Press 'u' to fetch.`)
+      setFilterChangedStatus(state, `Exclude merges ${state.excludeMerges ? "ON" : "OFF"}.`)
       return
     }
 
@@ -1291,7 +1396,7 @@ async function runTui(options: RawOptions): Promise<number> {
         return
       }
       state.topRepos = parsed
-      setStatus(state, "Top repos updated.")
+      setFilterChangedStatus(state, "Top repos updated.")
       return
     }
 
@@ -1437,7 +1542,7 @@ async function runTui(options: RawOptions): Promise<number> {
       state.publicOnly = false
       state.excludeMerges = false
     }
-    setStatus(state, "Filter cleared. Press 'u' to fetch.")
+    setFilterChangedStatus(state, "Filter cleared.")
   }
 
   const render = (): void => {
@@ -1469,19 +1574,19 @@ async function runTui(options: RawOptions): Promise<number> {
         }
       }
 
-      const activePane = focus === "commits" ? "COMMITS" : "FILTERS"
-      const title = `gh viz TUI | Active pane: ${activePane} | Tab switch pane | Enter select | o open | Esc clear filter | q quit`
+      const activePane = focus === "preview" ? "PREVIEW" : "FILTERS"
+      const title = "gh viz TUI | Preview-first ranked view | Tab switch pane | Enter select/edit | u refetch | q quit"
       header.setContent(ellipsize(title, Math.max(10, screen.width as number)))
 
-      commitsLabel.setContent(focus === "commits" ? "Commits (chart window) [ACTIVE]" : "Commits (chart window)")
-      commitsLabel.style = { underline: true, bold: focus === "commits", fg: focus === "commits" ? "cyan" : "white" }
+      previewLabel.setContent(focus === "preview" ? "Preview (ranked orgs + repos) [ACTIVE]" : "Preview (ranked orgs + repos)")
+      previewLabel.style = { underline: true, bold: focus === "preview", fg: focus === "preview" ? "cyan" : "white" }
       filtersLabel.setContent(focus === "filters" ? "Filters [ACTIVE]" : "Filters")
       filtersLabel.style = { underline: true, bold: focus === "filters", fg: focus === "filters" ? "magenta" : "white" }
 
-      commitsList.style = {
-        ...commitsList.style,
-        border: { fg: focus === "commits" ? "cyan" : "gray" },
-        selected: focus === "commits"
+      previewList.style = {
+        ...previewList.style,
+        border: { fg: focus === "preview" ? "cyan" : "gray" },
+        selected: focus === "preview"
           ? { bg: "cyan", fg: "black", bold: true }
           : { bg: "blue", fg: "white", bold: true },
       }
@@ -1493,47 +1598,26 @@ async function runTui(options: RawOptions): Promise<number> {
           : { bg: "blue", fg: "white", bold: true },
       }
 
-      const dataState = state.isFetching ? "fetching" : state.hasFetched ? "loaded" : "not-loaded"
+      const refetchRequired = isRefetchRequired(state)
+      const dataState = state.isFetching
+        ? "fetching"
+        : !state.hasFetched
+          ? "not-loaded"
+          : refetchRequired
+            ? "stale"
+            : "fresh"
       summary.setContent(
         ellipsize(
-          `Author=@${state.author} Data=${dataState} Summary=${currentView.summaryStart}..${isoDateUTC(state.endDate)} ChartDays=${state.daysChart} Commits=${currentView.summaryRecords.length} Repos=${currentView.repoRows.length} Orgs=${currentView.orgRows.length}`,
+          `Author=@${state.author} Data=${dataState} FetchSince=${requiredFetchSince(state)} Summary=${currentView.summaryStart}..${isoDateUTC(state.endDate)} Commits=${currentView.summaryRecords.length} Repos=${currentView.repoRows.length} Orgs=${currentView.orgRows.length}`,
           Math.max(10, screen.width as number),
         ),
       )
 
-      const dayCounts = new Map<string, number>()
-      for (const record of currentView.chartRecords) {
-        dayCounts.set(record.day, (dayCounts.get(record.day) ?? 0) + 1)
-      }
-
-      const previewDays = 28
-      const previewStart = addDays(state.endDate, -(previewDays - 1))
-      const previewDates = dateRange(previewStart, state.endDate)
-      const previewSymbols = previewDates
-        .map(d => intensityColoredSymbol(dayCounts.get(isoDateUTC(d)) ?? 0))
-        .join("")
-      preview.setContent(
-        `Preview 28d ${isoDateUTC(previewStart)}→${isoDateUTC(state.endDate)} ${previewSymbols}`,
-      )
-
-      const maxVisibleCommits = 250
-      visibleCommits = currentView.chartRecords.slice(0, maxVisibleCommits)
-      const hiddenCount = Math.max(0, currentView.chartRecords.length - visibleCommits.length)
-
-      const commitItems = visibleCommits.length > 0
-        ? visibleCommits.map(r => {
-          const count = dayCounts.get(r.day) ?? 0
-          const repo = escapeBlessedTags(r.repo)
-          const subject = escapeBlessedTags(r.subject)
-          return `${intensityColoredSymbol(count)} ${r.day} (${String(count).padStart(2, " ")}) ${repo} ${subject}`
-        })
-        : [state.hasFetched ? "(no commits for current chart window + filters)" : "(no data loaded yet - press 'u' to fetch)"]
-      if (hiddenCount > 0) {
-        commitItems.push(`{yellow-fg}... ${hiddenCount} more commits not shown (narrow filters){/}`)
-      }
-      const selectedCommit = Math.min(selectedIndex(commitsList), commitItems.length - 1)
-      commitsList.setItems(commitItems)
-      commitsList.select(Math.max(0, selectedCommit))
+      const previewRows = buildPreviewRows(state, currentView)
+      const selectedPreview = Math.min(selectedIndex(previewList), previewRows.items.length - 1)
+      previewList.setItems(previewRows.items)
+      previewList.select(Math.max(0, selectedPreview))
+      previewTargets = previewRows.targets
 
       const fRows = filterRows(state)
       const filterItems = fRows.map(([label, value]) => `${label}: ${colorizeFilterValue(label, value)}`)
@@ -1541,25 +1625,11 @@ async function runTui(options: RawOptions): Promise<number> {
       filtersList.setItems(filterItems)
       filtersList.select(Math.max(0, selectedFilter))
 
-      const commitIndex = Math.min(selectedIndex(commitsList), Math.max(0, visibleCommits.length - 1))
-      const selected = visibleCommits[commitIndex]
-      const selectedDayCount = selected ? (dayCounts.get(selected.day) ?? 0) : 0
-      detail.setContent(
-        ellipsize(
-          selected
-            ? `${intensitySymbol(selectedDayCount)} dayCount=${selectedDayCount} ${selected.repo}#${selected.sha.slice(0, 10)} ${selected.subject}`
-            : hiddenCount > 0 && selectedIndex(commitsList) >= visibleCommits.length
-              ? "(more commits hidden; narrow filters to inspect)"
-              : "(no commit selected)",
-          Math.max(10, screen.width as number),
-        ),
-      )
-
       const statusText = state.status || "Ready."
       status.setContent(ellipsize(`Pane=${activePane} | ${statusText} | Intensity: ·░▒▓█`, Math.max(10, screen.width as number)))
       status.style = state.statusError ? { fg: "red" } : { fg: "white" }
 
-      if (focus === "commits") commitsList.focus()
+      if (focus === "preview") previewList.focus()
       if (focus === "filters") filtersList.focus()
 
       screen.render()
@@ -1586,7 +1656,7 @@ async function runTui(options: RawOptions): Promise<number> {
   })
 
   screen.key(["tab"], () => {
-    focus = focus === "commits" ? "filters" : "commits"
+    focus = focus === "preview" ? "filters" : "preview"
     render()
   })
 
@@ -1625,22 +1695,30 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    const selected = visibleCommits[selectedIndex(commitsList)]
-    if (!selected) {
-      setStatus(state, "No commit selected.", true)
+    const target = previewTargets[selectedIndex(previewList)]
+    if (!target) {
+      setStatus(state, "Select a ranked org/repo row, then press 'o' to open.")
       render()
       return
     }
-    setStatus(state, `Selected ${selected.repo}@${selected.sha.slice(0, 7)} (press 'o' to open)`)
+    setStatus(state, `Selected ${target.type} ${target.slug} (press 'o' to open).`)
     render()
   })
 
   screen.key(["o"], () => {
-    const selected = visibleCommits[selectedIndex(commitsList)]
-    if (!selected) return
+    const target = previewTargets[selectedIndex(previewList)]
+    if (!target) {
+      setStatus(state, "No org/repo row selected.", true)
+      render()
+      return
+    }
     try {
-      runGh(["browse", `${selected.repo}/commit/${selected.sha}`])
-      setStatus(state, `Opened ${selected.repo}@${selected.sha.slice(0, 7)}`)
+      if (target.type === "repo") {
+        runGh(["browse", target.slug])
+      } else {
+        runGh(["browse", `https://github.com/${target.slug}`])
+      }
+      setStatus(state, `Opened ${target.type} ${target.slug}`)
     } catch (error) {
       setStatus(state, error instanceof Error ? `Open failed: ${error.message}` : "Open failed", true)
     }
