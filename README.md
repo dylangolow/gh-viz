@@ -62,6 +62,7 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 - TUI panes:
   - commit list
   - filter editor
+  - 28-day preview strip above panes
   - selected commit details
 
 ## Options
@@ -85,6 +86,7 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 
 - `Up/Down` or `j/k`: move in focused pane
 - `Tab`: switch focus between commits and filters
+- `u`: apply/refetch data for current filters
 - `Enter`:
   - commits pane: select commit (status/details update)
   - filters pane: apply/edit selected filter
@@ -92,6 +94,11 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 - `o`: open selected commit in browser
 - `r`: reset all filters
 - `q`: quit
+
+TUI fetch model:
+- filters do not auto-fetch on every move/edit
+- adjust filters first, then press `u` or run the `Refetch data` filter action
+- this keeps navigation responsive and avoids fetch stalls while tuning
 
 TUI color cues:
 - active pane border/label is color-highlighted

@@ -83,6 +83,7 @@ interface TuiState {
   excludeMerges: boolean
   fetchedSince?: string
   records: CommitRecord[]
+  hasFetched: boolean
   totalCountHint?: number
   status: string
   statusError: boolean
@@ -661,44 +662,39 @@ async function askInt(prompt: string, defaultValue: number, minimum = 1): Promis
   }
 }
 
-async function askBool(prompt: string, defaultValue: boolean): Promise<boolean> {
-  const raw = (await ask(prompt, defaultValue ? "y" : "n")).toLowerCase()
-  if (!raw) return defaultValue
-  return ["y", "yes", "1", "true"].includes(raw)
-}
-
-async function askChoice<T extends string>(prompt: string, choices: readonly T[], defaultValue: T): Promise<T> {
-  while (true) {
-    const raw = (await ask(prompt, defaultValue)).toLowerCase() as T
-    if (choices.includes(raw)) return raw
-    console.log(`Choose one of: ${choices.join(", ")}`)
+async function selectFromMenu<T extends string>(
+  prompt: string,
+  items: Array<{ value: T; label: string }>,
+  defaultValue: T,
+): Promise<T> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return defaultValue
   }
-}
 
-async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
-  const items: Array<{ value: "tui" | "guided-text" | "text"; label: string }> = [
-    { value: "guided-text", label: "Quick wizard (range, filters, visualization)" },
-    { value: "tui", label: "TUI (interactive browser)" },
-    { value: "text", label: "Text output (defaults)" },
-  ]
-
-  let selected = 0
-  const totalLines = items.length + 1
+  let selected = Math.max(0, items.findIndex(i => i.value === defaultValue))
+  if (selected < 0) selected = 0
+  const maxLabelLen = Math.max(...items.map((item, i) => `${i + 1}) ${item.label}`.length))
+  const headerText = `${prompt} (↑/↓, Enter)`
+  const innerWidth = Math.max(maxLabelLen + 6, headerText.length + 2, 24)
+  const totalLines = items.length + 4
 
   const drawMenu = (firstRender: boolean): void => {
     if (!firstRender) {
       process.stdout.write(`\x1B[${totalLines}A`)
     }
 
-    process.stdout.write("\x1B[2K\rSelect mode (use ↑/↓, Enter to confirm)\n")
+    process.stdout.write(`\x1B[2K\r┌${"─".repeat(innerWidth)}┐\n`)
+    process.stdout.write(`\x1B[2K\r│ ${headerText.padEnd(innerWidth - 2, " ")} │\n`)
+    process.stdout.write(`\x1B[2K\r├${"─".repeat(innerWidth)}┤\n`)
     items.forEach((item, i) => {
-      const marker = i === selected ? ">" : " "
-      process.stdout.write(`\x1B[2K\r${marker} ${i + 1}) ${item.label}\n`)
+      const text = `${i + 1}) ${item.label}`.padEnd(innerWidth - 4, " ")
+      if (i === selected) {
+        process.stdout.write(`\x1B[2K\r│ \x1B[30;46m❯ ${text}\x1B[0m │\n`)
+      } else {
+        process.stdout.write(`\x1B[2K\r│   ${text} │\n`)
+      }
     })
-  }
-
-  if (!process.stdin.isTTY) {
-    return items[0]!.value
+    process.stdout.write(`\x1B[2K\r└${"─".repeat(innerWidth)}┘\n`)
   }
 
   drawMenu(true)
@@ -707,7 +703,7 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
   process.stdin.setRawMode(true)
   process.stdin.resume()
 
-  return await new Promise(resolve => {
+  return await new Promise<T>(resolve => {
     const onKeypress = (str: string, key: readlineCore.Key): void => {
       if (key.name === "up") {
         selected = (selected - 1 + items.length) % items.length
@@ -721,22 +717,23 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
         return
       }
 
-      if (str === "1" || str === "2" || str === "3") {
-        selected = Number(str) - 1
-        drawMenu(false)
+      if (/^[1-9]$/.test(str)) {
+        const idx = Number(str) - 1
+        if (idx >= 0 && idx < items.length) {
+          selected = idx
+          drawMenu(false)
+        }
         return
       }
 
       if (key.name === "return" || key.name === "enter") {
         cleanup()
-        process.stdout.write("\n")
         resolve(items[selected]!.value)
         return
       }
 
       if (key.ctrl && key.name === "c") {
         cleanup()
-        process.stdout.write("\n")
         process.exit(1)
       }
     }
@@ -751,9 +748,38 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
   })
 }
 
+async function askBool(prompt: string, defaultValue: boolean): Promise<boolean> {
+  const picked = await selectFromMenu(
+    prompt,
+    [
+      { value: "yes", label: "Yes" },
+      { value: "no", label: "No" },
+    ],
+    defaultValue ? "yes" : "no",
+  )
+  return picked === "yes"
+}
+
+async function askChoice<T extends string>(prompt: string, choices: readonly T[], defaultValue: T): Promise<T> {
+  const items = choices.map(choice => ({ value: choice, label: String(choice) }))
+  return await selectFromMenu(prompt, items, defaultValue)
+}
+
+async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
+  return await selectFromMenu(
+    "Select mode",
+    [
+      { value: "guided-text", label: "Quick wizard (range, filters, visualization)" },
+      { value: "tui", label: "TUI (interactive browser)" },
+      { value: "text", label: "Text output (defaults)" },
+    ],
+    "guided-text",
+  )
+}
+
 async function runTextWizard(options: RawOptions): Promise<RawOptions> {
   const author = options.author || getDefaultAuthor()
-  console.log("\nQuick setup wizard\n")
+  console.log("Quick setup wizard")
 
   while (true) {
     const input = await ask("Author (GitHub handle)", author)
@@ -766,7 +792,11 @@ async function runTextWizard(options: RawOptions): Promise<RawOptions> {
     }
   }
 
-  const range = await askChoice("Time range (7d|14d|28d|90d|custom)", ["7d", "14d", "28d", "90d", "custom"] as const, "28d")
+  const range = await askChoice(
+    "Time range",
+    ["7d", "14d", "28d", "90d", "custom"] as const,
+    "28d",
+  )
   if (range === "custom") {
     const customDays = await askInt("Range days", options.daysChart, 1)
     options.daysSummary = customDays
@@ -777,22 +807,89 @@ async function runTextWizard(options: RawOptions): Promise<RawOptions> {
     options.daysChart = days
   }
 
-  const endDate = await ask("End date UTC (YYYY-MM-DD, blank=today)", options.endDate || "")
-  options.endDate = endDate || undefined
+  const endDateMode = await askChoice(
+    "End date",
+    ["today", "custom"] as const,
+    options.endDate ? "custom" : "today",
+  )
+  if (endDateMode === "custom") {
+    while (true) {
+      const endDate = await ask("End date UTC (YYYY-MM-DD)", options.endDate || "")
+      try {
+        parseISODate(endDate)
+        options.endDate = endDate
+        break
+      } catch {
+        console.log("Date must be YYYY-MM-DD")
+      }
+    }
+  } else {
+    options.endDate = undefined
+  }
 
-  options.groupBy = await askChoice("Group by (both|org|repo)", ["both", "org", "repo"] as const, options.groupBy)
+  options.groupBy = await askChoice(
+    "Group output by",
+    ["both", "org", "repo"] as const,
+    options.groupBy,
+  )
 
-  const includeOrg = await ask("Include orgs (comma-separated, blank=none)", options.includeOrg.join(","))
-  options.includeOrg = includeOrg ? [includeOrg] : []
-  const includeRepo = await ask("Include repos owner/name (comma-separated, blank=none)", options.includeRepo.join(","))
-  options.includeRepo = includeRepo ? [includeRepo] : []
+  const orgFilterMode = await askChoice(
+    "Org filters",
+    ["none", "include", "exclude", "include+exclude"] as const,
+    options.includeOrg.length > 0 && options.excludeOrg.length > 0
+      ? "include+exclude"
+      : options.includeOrg.length > 0
+        ? "include"
+        : options.excludeOrg.length > 0
+          ? "exclude"
+          : "none",
+  )
+  options.includeOrg = []
+  options.excludeOrg = []
+  if (orgFilterMode === "include" || orgFilterMode === "include+exclude") {
+    const includeOrg = await ask("Include orgs (comma-separated)", options.includeOrg.join(","))
+    options.includeOrg = includeOrg ? [includeOrg] : []
+  }
+  if (orgFilterMode === "exclude" || orgFilterMode === "include+exclude") {
+    const excludeOrg = await ask("Exclude orgs (comma-separated)", options.excludeOrg.join(","))
+    options.excludeOrg = excludeOrg ? [excludeOrg] : []
+  }
+
+  const repoFilterMode = await askChoice(
+    "Repo filters",
+    ["none", "include", "exclude", "include+exclude"] as const,
+    options.includeRepo.length > 0 && options.excludeRepo.length > 0
+      ? "include+exclude"
+      : options.includeRepo.length > 0
+        ? "include"
+        : options.excludeRepo.length > 0
+          ? "exclude"
+          : "none",
+  )
+  options.includeRepo = []
+  options.excludeRepo = []
+  if (repoFilterMode === "include" || repoFilterMode === "include+exclude") {
+    const includeRepo = await ask("Include repos owner/name (comma-separated)", options.includeRepo.join(","))
+    options.includeRepo = includeRepo ? [includeRepo] : []
+  }
+  if (repoFilterMode === "exclude" || repoFilterMode === "include+exclude") {
+    const excludeRepo = await ask("Exclude repos owner/name (comma-separated)", options.excludeRepo.join(","))
+    options.excludeRepo = excludeRepo ? [excludeRepo] : []
+  }
 
   options.publicOnly = await askBool("Public repos only", options.publicOnly)
   options.excludeMerges = await askBool("Exclude merge commits", options.excludeMerges)
-  options.topRepos = await askInt("Top repos to show", options.topRepos, 1)
+
+  const defaultTopRepos = [10, 20, 50].includes(options.topRepos) ? String(options.topRepos) : "20"
+  const topReposChoice = await askChoice("Top repos in tables", ["10", "20", "50", "custom"] as const, defaultTopRepos as "10" | "20" | "50" | "custom")
+  if (topReposChoice === "custom") {
+    options.topRepos = await askInt("Top repos to show", options.topRepos, 1)
+  } else {
+    options.topRepos = Number(topReposChoice)
+  }
 
   options.viz = await askChoice(
-    "Visualization (summary|heat|bars|heatstamp|all|json)",
+    "Visualization",
     ["summary", "heat", "bars", "heatstamp", "all", "json"] as const,
     options.viz,
   )
@@ -805,8 +902,18 @@ async function runTextWizard(options: RawOptions): Promise<RawOptions> {
     options.format = "table"
   }
 
-  const outputPath = await ask("Output file (blank=stdout)", options.output || "")
-  options.output = outputPath || undefined
+  const outputMode = await askChoice(
+    "Output destination",
+    ["stdout", "file"] as const,
+    options.output ? "file" : "stdout",
+  )
+  if (outputMode === "file") {
+    const defaultName = options.output || (options.viz === "json" ? "gh-viz.json" : "gh-viz.md")
+    const outputPath = await ask("Output file path", defaultName)
+    options.output = outputPath || undefined
+  } else {
+    options.output = undefined
+  }
 
   return options
 }
@@ -891,7 +998,8 @@ async function runTui(options: RawOptions): Promise<number> {
     publicOnly: options.publicOnly,
     excludeMerges: options.excludeMerges,
     records: [],
-    status: "Loading...",
+    hasFetched: false,
+    status: "Adjust filters, then press 'u' or choose Refetch data.",
     statusError: false,
   }
 
@@ -911,11 +1019,12 @@ async function runTui(options: RawOptions): Promise<number> {
 
   const header = blessed.box({ top: 0, left: 0, width: "100%", height: 1, tags: false, style: { bold: true } })
   const summary = blessed.box({ top: 1, left: 0, width: "100%", height: 1 })
-  const commitsLabel = blessed.box({ top: 2, left: 0, width: "66%", height: 1, content: "Commits (chart window)", style: { underline: true } })
-  const filtersLabel = blessed.box({ top: 2, left: "66%", width: "34%", height: 1, content: "Filters", style: { underline: true } })
+  const preview = blessed.box({ top: 2, left: 0, width: "100%", height: 1, tags: true })
+  const commitsLabel = blessed.box({ top: 3, left: 0, width: "66%", height: 1, content: "Commits (chart window)", style: { underline: true } })
+  const filtersLabel = blessed.box({ top: 3, left: "66%", width: "34%", height: 1, content: "Filters", style: { underline: true } })
 
   const commitsList = blessed.list({
-    top: 3,
+    top: 4,
     left: 0,
     width: "66%",
     bottom: 3,
@@ -931,7 +1040,7 @@ async function runTui(options: RawOptions): Promise<number> {
   })
 
   const filtersList = blessed.list({
-    top: 3,
+    top: 4,
     left: "66%",
     width: "34%",
     bottom: 3,
@@ -953,11 +1062,12 @@ async function runTui(options: RawOptions): Promise<number> {
     left: 0,
     width: "100%",
     height: 1,
-    content: "Keys: Up/Down move, Tab switch pane, Enter select, Esc clear filter, o open commit, r reset, q quit",
+    content: "Keys: Up/Down move, Tab switch pane, Enter select, u update/refetch, Esc clear filter, o open commit, r reset, q quit",
   })
 
   screen.append(header)
   screen.append(summary)
+  screen.append(preview)
   screen.append(commitsLabel)
   screen.append(filtersLabel)
   screen.append(commitsList)
@@ -975,6 +1085,7 @@ async function runTui(options: RawOptions): Promise<number> {
     orgRows: [],
     repoRows: [],
   }
+  let visibleCommits: CommitRecord[] = []
 
   const askInTui = (question: string, initial = ""): Promise<string | null> => {
     return new Promise(resolve => {
@@ -986,6 +1097,22 @@ async function runTui(options: RawOptions): Promise<number> {
     })
   }
 
+  const runFetch = (): void => {
+    const neededSince = isoDateUTC(addDays(state.endDate, -(Math.max(state.daysSummary, state.daysChart) - 1)))
+    try {
+      setStatus(state, `Fetching @${state.author} since ${neededSince}...`)
+      const { records, totalCountHint } = fetchRecords(state.author, neededSince)
+      state.records = records
+      state.totalCountHint = totalCountHint
+      state.fetchedSince = neededSince
+      state.hasFetched = true
+      setStatus(state, `Loaded ${records.length} commits for @${state.author} since ${neededSince}.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setStatus(state, `Fetch failed: ${message}`, true)
+    }
+  }
+
   const applyFilter = async (index: number): Promise<void> => {
     if (index === 0) {
       const raw = await askInTui("GitHub handle (blank keeps current)", state.author)
@@ -994,9 +1121,10 @@ async function runTui(options: RawOptions): Promise<number> {
         const login = resolveGitHubLogin(raw)
         state.author = login
         state.records = []
+        state.hasFetched = false
         state.fetchedSince = undefined
         state.totalCountHint = undefined
-        setStatus(state, `Author set to @${login}. Reloading...`)
+        setStatus(state, `Author set to @${login}. Press 'u' to fetch.`)
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         setStatus(state, msg, true)
@@ -1016,7 +1144,7 @@ async function runTui(options: RawOptions): Promise<number> {
           return
         }
       }
-      setStatus(state, "End date updated.")
+      setStatus(state, "End date updated. Press 'u' to fetch.")
       return
     }
 
@@ -1029,7 +1157,7 @@ async function runTui(options: RawOptions): Promise<number> {
         return
       }
       state.daysSummary = parsed
-      setStatus(state, "Summary days updated.")
+      setStatus(state, "Summary days updated. Press 'u' to fetch.")
       return
     }
 
@@ -1042,7 +1170,7 @@ async function runTui(options: RawOptions): Promise<number> {
         return
       }
       state.daysChart = parsed
-      setStatus(state, "Chart days updated.")
+      setStatus(state, "Chart days updated. Press 'u' to fetch.")
       return
     }
 
@@ -1066,19 +1194,19 @@ async function runTui(options: RawOptions): Promise<number> {
       if (index === 6) state.excludeOrg = values
       if (index === 7) state.includeRepo = values
       if (index === 8) state.excludeRepo = values
-      setStatus(state, "Filter updated.")
+      setStatus(state, "Filter updated. Press 'u' to fetch.")
       return
     }
 
     if (index === 9) {
       state.publicOnly = !state.publicOnly
-      setStatus(state, `Public only ${state.publicOnly ? "ON" : "OFF"}.`)
+      setStatus(state, `Public only ${state.publicOnly ? "ON" : "OFF"}. Press 'u' to fetch.`)
       return
     }
 
     if (index === 10) {
       state.excludeMerges = !state.excludeMerges
-      setStatus(state, `Exclude merges ${state.excludeMerges ? "ON" : "OFF"}.`)
+      setStatus(state, `Exclude merges ${state.excludeMerges ? "ON" : "OFF"}. Press 'u' to fetch.`)
       return
     }
 
@@ -1096,10 +1224,7 @@ async function runTui(options: RawOptions): Promise<number> {
     }
 
     if (index === 12) {
-      state.records = []
-      state.fetchedSince = undefined
-      state.totalCountHint = undefined
-      setStatus(state, "Refetch queued.")
+      runFetch()
       return
     }
 
@@ -1164,9 +1289,10 @@ async function runTui(options: RawOptions): Promise<number> {
         if (typeof preset.excludeMerges === "boolean") state.excludeMerges = preset.excludeMerges
 
         state.records = []
+        state.hasFetched = false
         state.fetchedSince = undefined
         state.totalCountHint = undefined
-        setStatus(state, `Loaded preset ${path}`)
+        setStatus(state, `Loaded preset ${path}. Press 'u' to fetch.`)
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         setStatus(state, `Load failed: ${msg}`, true)
@@ -1206,6 +1332,7 @@ async function runTui(options: RawOptions): Promise<number> {
     if (index === 0) {
       state.author = author
       state.records = []
+      state.hasFetched = false
       state.fetchedSince = undefined
       state.totalCountHint = undefined
     }
@@ -1223,6 +1350,7 @@ async function runTui(options: RawOptions): Promise<number> {
     if (index === 15) {
       state.author = author
       state.records = []
+      state.hasFetched = false
       state.fetchedSince = undefined
       state.totalCountHint = undefined
       state.endDate = todayUTC()
@@ -1237,12 +1365,11 @@ async function runTui(options: RawOptions): Promise<number> {
       state.publicOnly = false
       state.excludeMerges = false
     }
-    setStatus(state, "Filter cleared.")
+    setStatus(state, "Filter cleared. Press 'u' to fetch.")
   }
 
   const render = (): void => {
     try {
-      ensureTuiData(state)
       currentView = buildActivityView({
         records: state.records,
         endDate: state.endDate,
@@ -1257,7 +1384,7 @@ async function runTui(options: RawOptions): Promise<number> {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      setStatus(state, `Fetch failed: ${message}`, true)
+      setStatus(state, `Render failed: ${message}`, true)
       currentView = {
         summaryStart: isoDateUTC(addDays(state.endDate, -(state.daysSummary - 1))),
         chartStart: isoDateUTC(addDays(state.endDate, -(state.daysChart - 1))),
@@ -1292,9 +1419,10 @@ async function runTui(options: RawOptions): Promise<number> {
         : { bg: "blue", fg: "white", bold: true },
     }
 
+    const dataState = state.hasFetched ? "loaded" : "not-loaded"
     summary.setContent(
       ellipsize(
-        `Author=${state.author} Summary=${currentView.summaryStart}..${isoDateUTC(state.endDate)} ChartDays=${state.daysChart} Commits=${currentView.summaryRecords.length} Repos=${currentView.repoRows.length} Orgs=${currentView.orgRows.length}`,
+        `Author=@${state.author} Data=${dataState} Summary=${currentView.summaryStart}..${isoDateUTC(state.endDate)} ChartDays=${state.daysChart} Commits=${currentView.summaryRecords.length} Repos=${currentView.repoRows.length} Orgs=${currentView.orgRows.length}`,
         Math.max(10, screen.width as number),
       ),
     )
@@ -1304,12 +1432,29 @@ async function runTui(options: RawOptions): Promise<number> {
       dayCounts.set(record.day, (dayCounts.get(record.day) ?? 0) + 1)
     }
 
-    const commitItems = currentView.chartRecords.length > 0
-      ? currentView.chartRecords.map(r => {
+    const previewDays = 28
+    const previewStart = addDays(state.endDate, -(previewDays - 1))
+    const previewDates = dateRange(previewStart, state.endDate)
+    const previewSymbols = previewDates
+      .map(d => intensityColoredSymbol(dayCounts.get(isoDateUTC(d)) ?? 0))
+      .join("")
+    preview.setContent(
+      `Preview 28d ${isoDateUTC(previewStart)}→${isoDateUTC(state.endDate)} ${previewSymbols}`,
+    )
+
+    const maxVisibleCommits = 250
+    visibleCommits = currentView.chartRecords.slice(0, maxVisibleCommits)
+    const hiddenCount = Math.max(0, currentView.chartRecords.length - visibleCommits.length)
+
+    const commitItems = visibleCommits.length > 0
+      ? visibleCommits.map(r => {
         const count = dayCounts.get(r.day) ?? 0
         return `${intensityColoredSymbol(count)} ${r.day} (${String(count).padStart(2, " ")}) ${r.repo} ${r.subject}`
       })
-      : ["(no commits for current chart window + filters)"]
+      : [state.hasFetched ? "(no commits for current chart window + filters)" : "(no data loaded yet - press 'u' to fetch)"]
+    if (hiddenCount > 0) {
+      commitItems.push(`{yellow-fg}... ${hiddenCount} more commits not shown (narrow filters){/}`)
+    }
     const selectedCommit = Math.min(selectedIndex(commitsList), commitItems.length - 1)
     commitsList.setItems(commitItems)
     commitsList.select(Math.max(0, selectedCommit))
@@ -1320,14 +1465,16 @@ async function runTui(options: RawOptions): Promise<number> {
     filtersList.setItems(filterItems)
     filtersList.select(Math.max(0, selectedFilter))
 
-    const commitIndex = Math.min(selectedIndex(commitsList), Math.max(0, currentView.chartRecords.length - 1))
-    const selected = currentView.chartRecords[commitIndex]
+    const commitIndex = Math.min(selectedIndex(commitsList), Math.max(0, visibleCommits.length - 1))
+    const selected = visibleCommits[commitIndex]
     const selectedDayCount = selected ? (dayCounts.get(selected.day) ?? 0) : 0
     detail.setContent(
       ellipsize(
         selected
           ? `${intensitySymbol(selectedDayCount)} dayCount=${selectedDayCount} ${selected.repo}#${selected.sha.slice(0, 10)} ${selected.subject}`
-          : "(no commit selected)",
+          : hiddenCount > 0 && selectedIndex(commitsList) >= visibleCommits.length
+            ? "(more commits hidden; narrow filters to inspect)"
+            : "(no commit selected)",
         Math.max(10, screen.width as number),
       ),
     )
@@ -1362,6 +1509,11 @@ async function runTui(options: RawOptions): Promise<number> {
     render()
   })
 
+  screen.key(["u"], () => {
+    runFetch()
+    render()
+  })
+
   screen.key(["enter"], async () => {
     if (focus === "filters") {
       await applyFilter(selectedIndex(filtersList))
@@ -1369,7 +1521,7 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    const selected = currentView.chartRecords[selectedIndex(commitsList)]
+    const selected = visibleCommits[selectedIndex(commitsList)]
     if (!selected) {
       setStatus(state, "No commit selected.", true)
       render()
@@ -1380,7 +1532,7 @@ async function runTui(options: RawOptions): Promise<number> {
   })
 
   screen.key(["o"], () => {
-    const selected = currentView.chartRecords[selectedIndex(commitsList)]
+    const selected = visibleCommits[selectedIndex(commitsList)]
     if (!selected) return
     try {
       runGh(["browse", `${selected.repo}/commit/${selected.sha}`])
