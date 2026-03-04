@@ -14,17 +14,24 @@ No AI summarization is included. This focuses on commit history and grouped metr
 
 ## Install
 
-From local checkout:
+Install directly from GitHub:
 
 ```bash
-cd /Users/dylangolow/workspace/dylangolow/gh-activity-viz
-gh extension install .
+gh extension install dylangolow/gh-activity-viz
 ```
 
 If already installed:
 
 ```bash
 gh extension upgrade activity-viz
+```
+
+Install from local checkout (for development):
+
+```bash
+git clone git@github.com:dylangolow/gh-activity-viz.git
+cd gh-activity-viz
+gh extension install .
 ```
 
 ## Run
@@ -83,10 +90,22 @@ If you run without args in an interactive terminal, startup prompts you for:
 
 ## Examples
 
+Start interactive mode selector (`TUI` / `Guided text` / `Text defaults`):
+
+```bash
+gh activity-viz
+```
+
+Open straight into TUI:
+
+```bash
+gh activity-viz --mode tui
+```
+
 Table output for terminal:
 
 ```bash
-gh activity-viz --mode text --format table
+gh activity-viz --mode text --days-summary 7 --days-chart 28 --format table
 ```
 
 Markdown report to file:
@@ -111,6 +130,17 @@ Filter to specific orgs:
 
 ```bash
 gh activity-viz --include-org dylangolow,Conduit-BTC --group-by both
+```
+
+Filter to a specific repo and date window:
+
+```bash
+gh activity-viz \
+  --include-repo inklingdevelopers/inkling \
+  --end-date 2026-03-04 \
+  --days-summary 14 \
+  --days-chart 28 \
+  --format markdown
 ```
 
 ## Notes
