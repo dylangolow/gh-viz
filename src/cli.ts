@@ -84,6 +84,7 @@ interface TuiState {
   fetchedSince?: string
   records: CommitRecord[]
   hasFetched: boolean
+  isFetching: boolean
   totalCountHint?: number
   status: string
   statusError: boolean
@@ -777,6 +778,19 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
   )
 }
 
+async function choosePostTextAction(): Promise<"print-again" | "wizard" | "tui" | "quit"> {
+  return await selectFromMenu(
+    "Next action",
+    [
+      { value: "print-again", label: "Print again with current settings" },
+      { value: "wizard", label: "Run wizard again (change filters/output)" },
+      { value: "tui", label: "Open TUI with current settings" },
+      { value: "quit", label: "Quit" },
+    ],
+    "print-again",
+  )
+}
+
 async function runTextWizard(options: RawOptions): Promise<RawOptions> {
   const author = options.author || getDefaultAuthor()
   console.log("Quick setup wizard")
@@ -896,10 +910,8 @@ async function runTextWizard(options: RawOptions): Promise<RawOptions> {
 
   if (options.viz === "json") {
     options.format = "json"
-  } else if (options.viz === "all") {
-    options.format = "markdown"
   } else {
-    options.format = "table"
+    options.format = "auto"
   }
 
   const outputMode = await askChoice(
@@ -999,6 +1011,7 @@ async function runTui(options: RawOptions): Promise<number> {
     excludeMerges: options.excludeMerges,
     records: [],
     hasFetched: false,
+    isFetching: false,
     status: "Adjust filters, then press 'u' or choose Refetch data.",
     statusError: false,
   }
@@ -1062,7 +1075,7 @@ async function runTui(options: RawOptions): Promise<number> {
     left: 0,
     width: "100%",
     height: 1,
-    content: "Keys: Up/Down move, Tab switch pane, Enter select, u update/refetch, Esc clear filter, o open commit, r reset, q quit",
+    content: "Keys: Up/Down move, Tab pane, v visuals/commits, Enter select, u fetch/apply, Esc clear, o open, r reset, q quit",
   })
 
   screen.append(header)
@@ -1742,6 +1755,7 @@ async function run(): Promise<number> {
   let options = normalizeOptions(program)
   const noArgs = process.argv.length <= 2
   const interactiveTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+  let interactiveTextLoop = false
 
   if (options.mode === "auto" && noArgs && interactiveTTY) {
     const mode = await chooseStartupMode()
@@ -1750,18 +1764,41 @@ async function run(): Promise<number> {
     } else if (mode === "guided-text") {
       options.mode = "text"
       options = await runTextWizard(options)
+      interactiveTextLoop = true
     } else {
       options.mode = "text"
+      interactiveTextLoop = true
     }
   } else if (options.mode === "text" && noArgs && interactiveTTY) {
     options = await runTextWizard(options)
+    interactiveTextLoop = true
   }
 
   if (options.mode === "tui") {
     return await runTui(options)
   }
 
-  return await runTextMode(options)
+  if (!interactiveTextLoop) {
+    return await runTextMode(options)
+  }
+
+  while (true) {
+    const code = await runTextMode(options)
+    if (code !== 0) return code
+
+    const action = await choosePostTextAction()
+    if (action === "print-again") {
+      continue
+    }
+    if (action === "wizard") {
+      options = await runTextWizard(options)
+      continue
+    }
+    if (action === "tui") {
+      return await runTui(options)
+    }
+    return 0
+  }
 }
 
 run().catch(error => {

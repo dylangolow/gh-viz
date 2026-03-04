@@ -7,6 +7,7 @@ Terminal commit activity explorer for GitHub CLI.
 - interactive TUI commit browsing with keyboard filters
 - readable terminal table output (width-aware)
 - markdown and JSON exports
+- post-output action loop for interactive text sessions
 - grouping by org, repo, or both
 - org/repo include and exclude filters
 - switch analyzed user by GitHub handle inside TUI
@@ -49,6 +50,13 @@ If you run without args in an interactive terminal, startup prompts you for:
 3. `Text output (defaults)`
 
 Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also work).
+
+After text output completes in interactive startup mode, a next-action menu appears:
+
+1. `Print again with current settings`
+2. `Run wizard again (change filters/output)`
+3. `Open TUI with current settings`
+4. `Quit`
 
 ## What You Get
 
