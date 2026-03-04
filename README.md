@@ -9,6 +9,8 @@ Terminal commit activity explorer for GitHub CLI.
 - markdown and JSON exports
 - grouping by org, repo, or both
 - org/repo include and exclude filters
+- switch analyzed user by GitHub handle inside TUI
+- refetch + save/load filter presets in TUI
 
 No AI summarization is included. This focuses on commit history and grouped metrics.
 
@@ -42,8 +44,8 @@ gh viz
 
 If you run without args in an interactive terminal, startup prompts you for:
 
-1. `TUI`
-2. `Guided text output`
+1. `Quick wizard (range, filters, visualization)`
+2. `TUI`
 3. `Text output (defaults)`
 
 Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also work).
@@ -66,7 +68,7 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 
 - `--author <login>`: GitHub user to analyze (default: current `gh` user)
 - `--mode <auto|text|tui>`: run mode (default `auto`)
-- `--days-summary <n>`: summary/grouping window days (default `7`)
+- `--days-summary <n>`: summary/grouping window days (default `28`)
 - `--days-chart <n>`: chart window days (default `28`)
 - `--end-date YYYY-MM-DD`: end date in UTC
 - `--group-by <org|repo|both>`: summary grouping (default `both`)
@@ -76,6 +78,7 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 - `--exclude-merges`: remove merge commits
 - `--top-repos <n>`: repo rows to keep (default `20`)
 - `--format <auto|table|markdown|json>`
+- `--viz <summary|heat|bars|heatstamp|all|json>`: choose visualization output
 - `--output <path>`: write to file instead of stdout
 
 ## TUI Keys
@@ -83,16 +86,22 @@ Use `↑/↓` to move selection and `Enter` to confirm (number keys `1/2/3` also
 - `Up/Down` or `j/k`: move in focused pane
 - `Tab`: switch focus between commits and filters
 - `Enter`:
-  - commits pane: open selected commit in browser
+  - commits pane: select commit (status/details update)
   - filters pane: apply/edit selected filter
 - `Esc` (filters pane): clear selected filter
 - `o`: open selected commit in browser
 - `r`: reset all filters
 - `q`: quit
 
+TUI color cues:
+- active pane border/label is color-highlighted
+- selected rows are color-highlighted as you move
+- filter toggles show `ON` in green and `OFF` in red
+- commit rows include per-day intensity color markers (`·░▒▓█`)
+
 ## Examples
 
-Start interactive mode selector (`TUI` / `Guided text` / `Text defaults`):
+Start interactive mode selector (`Quick wizard` / `TUI` / `Text defaults`):
 
 ```bash
 gh viz
@@ -107,7 +116,19 @@ gh viz --mode tui
 Table output for terminal:
 
 ```bash
-gh viz --mode text --days-summary 7 --days-chart 28 --format table
+gh viz --mode text --viz summary --days-summary 7 --days-chart 28 --format table
+```
+
+Heat row visualization:
+
+```bash
+gh viz --mode text --viz heat --days-summary 7 --days-chart 28 --format table
+```
+
+Bar chart visualization:
+
+```bash
+gh viz --mode text --viz bars --days-summary 7 --days-chart 28 --format table
 ```
 
 Markdown report to file:
@@ -125,7 +146,7 @@ gh viz \
 JSON for downstream tooling:
 
 ```bash
-gh viz --group-by repo --public-only --exclude-merges --format json
+gh viz --viz json --group-by repo --public-only --exclude-merges --format json
 ```
 
 Filter to specific orgs:

@@ -13,6 +13,7 @@ const ACCEPT_HEADER = "Accept: application/vnd.github.cloak-preview+json"
 type GroupBy = "org" | "repo" | "both"
 type Mode = "auto" | "text" | "tui"
 type OutputFormat = "auto" | "markdown" | "table" | "json"
+type Visualization = "summary" | "heat" | "bars" | "heatstamp" | "all" | "json"
 
 interface RawOptions {
   author?: string
@@ -29,6 +30,7 @@ interface RawOptions {
   topRepos: number
   groupBy: GroupBy
   format: OutputFormat
+  viz: Visualization
   output?: string
 }
 
@@ -108,6 +110,19 @@ function runGh(args: string[]): string {
 
 function getDefaultAuthor(): string {
   return runGh(["api", "user", "--jq", ".login"]).trim()
+}
+
+function resolveGitHubLogin(input: string): string {
+  const candidate = input.trim().replace(/^@/, "")
+  if (!candidate) {
+    throw new Error("GitHub handle cannot be empty.")
+  }
+
+  const login = runGh(["api", `users/${candidate}`, "--jq", ".login"]).trim()
+  if (!login) {
+    throw new Error(`GitHub user not found: ${candidate}`)
+  }
+  return login
 }
 
 function splitValues(rawValues: string[]): Set<string> {
@@ -306,6 +321,14 @@ function intensitySymbol(count: number): string {
   return "█"
 }
 
+function intensityColoredSymbol(count: number): string {
+  if (count === 0) return "{gray-fg}·{/}"
+  if (count <= 4) return "{cyan-fg}░{/}"
+  if (count <= 19) return "{green-fg}▒{/}"
+  if (count <= 59) return "{light-green-fg}▓{/}"
+  return "{white-fg}█{/}"
+}
+
 function dateRange(start: Date, end: Date): Date[] {
   const out: Date[] = []
   for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
@@ -364,6 +387,7 @@ function renderMarkdown(params: {
   topRepos: number
   daysSummary: number
   daysChart: number
+  viz: Visualization
   endDate: Date
 }): string {
   const chartStart = parseISODate(params.view.chartStart)
@@ -446,41 +470,59 @@ function renderMarkdown(params: {
     )
   }
 
-  sections.push(
-    "",
-    "## Visuals",
-    "",
-    "Daily commit counts in heat-row window:",
-    "",
-    ...dailyLines,
-    "",
-    "Intensity buckets:",
-    "",
-    "- `·` = 0",
-    "- `░` = 1-4",
-    "- `▒` = 5-19",
-    "- `▓` = 20-59",
-    "- `█` = 60+",
-    "",
-    "Heat row:",
-    "",
-    `| ${heatHeader} |`,
-    `| ${heatDates.map(() => "---").join(" | ")} |`,
-    `| ${heatCells} |`,
-    "",
-    `Mini heatstamp (${params.daysChart}-day window):`,
-    "",
-    ...heatstampLines,
-    "",
-    `Bar chart (${params.daysChart}-day window, scaled to max day = ${maxCount}):`,
-    "",
-    "```text",
-    ...barLines,
-    "```",
-    "",
-  )
+  const showHeat = params.viz === "heat" || params.viz === "all"
+  const showHeatstamp = params.viz === "heatstamp" || params.viz === "all"
+  const showBars = params.viz === "bars" || params.viz === "all"
+  const showTables = params.viz === "summary" || params.viz === "all"
 
-  if (params.groupBy === "both" || params.groupBy === "org") {
+  if (showHeat || showHeatstamp || showBars) {
+    sections.push("", "## Visuals", "")
+  }
+
+  if (showHeat) {
+    sections.push(
+      "Daily commit counts in heat-row window:",
+      "",
+      ...dailyLines,
+      "",
+      "Intensity buckets:",
+      "",
+      "- `·` = 0",
+      "- `░` = 1-4",
+      "- `▒` = 5-19",
+      "- `▓` = 20-59",
+      "- `█` = 60+",
+      "",
+      "Heat row:",
+      "",
+      `| ${heatHeader} |`,
+      `| ${heatDates.map(() => "---").join(" | ")} |`,
+      `| ${heatCells} |`,
+      "",
+    )
+  }
+
+  if (showHeatstamp) {
+    sections.push(
+      `Mini heatstamp (${params.daysChart}-day window):`,
+      "",
+      ...heatstampLines,
+      "",
+    )
+  }
+
+  if (showBars) {
+    sections.push(
+      `Bar chart (${params.daysChart}-day window, scaled to max day = ${maxCount}):`,
+      "",
+      "```text",
+      ...barLines,
+      "```",
+      "",
+    )
+  }
+
+  if (showTables && (params.groupBy === "both" || params.groupBy === "org")) {
     sections.push(
       `## By Org (${params.view.summaryStart} → ${isoDateUTC(endDate)})`,
       "",
@@ -489,7 +531,7 @@ function renderMarkdown(params: {
     )
   }
 
-  if (params.groupBy === "both" || params.groupBy === "repo") {
+  if (showTables && (params.groupBy === "both" || params.groupBy === "repo")) {
     sections.push(
       `## By Project (Top ${params.topRepos}, ${params.view.summaryStart} → ${isoDateUTC(endDate)})`,
       "",
@@ -506,6 +548,9 @@ function renderTableOutput(params: {
   view: ActivityView
   groupBy: GroupBy
   topRepos: number
+  daysSummary: number
+  daysChart: number
+  viz: Visualization
   endDate: Date
 }): string {
   const width = terminalWidth()
@@ -518,7 +563,61 @@ function renderTableOutput(params: {
   )
   lines.push("")
 
-  if (params.groupBy === "both" || params.groupBy === "org") {
+  const chartStart = parseISODate(params.view.chartStart)
+  const chartDates = dateRange(chartStart, params.endDate)
+  const chartCounts = new Map<string, number>()
+  for (const record of params.view.chartRecords) {
+    chartCounts.set(record.day, (chartCounts.get(record.day) ?? 0) + 1)
+  }
+  const maxCount = Math.max(0, ...chartDates.map(d => chartCounts.get(isoDateUTC(d)) ?? 0))
+
+  const heatDays = Math.min(7, params.daysSummary)
+  const heatStart = addDays(params.endDate, -(heatDays - 1))
+  const heatDates = dateRange(heatStart, params.endDate)
+
+  const showHeat = params.viz === "heat" || params.viz === "all"
+  const showHeatstamp = params.viz === "heatstamp" || params.viz === "all"
+  const showBars = params.viz === "bars" || params.viz === "all"
+  const showTables = params.viz === "summary" || params.viz === "all"
+
+  if (showHeat) {
+    lines.push(`Heat Row (${isoDateUTC(heatStart)} -> ${isoDateUTC(params.endDate)})`)
+    lines.push(heatDates.map(d => d.toISOString().slice(5, 10)).join(" "))
+    lines.push(heatDates.map(d => intensitySymbol(chartCounts.get(isoDateUTC(d)) ?? 0)).join("  "))
+    lines.push("Legend: ·=0 ░=1-4 ▒=5-19 ▓=20-59 █=60+")
+    lines.push("")
+  }
+
+  if (showHeatstamp) {
+    const weekChunks: Date[][] = []
+    for (let i = 0; i < chartDates.length; i += 7) {
+      weekChunks.push(chartDates.slice(i, i + 7))
+    }
+    const weekdayHeaders = (weekChunks[0] ?? []).map(d => d.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" }))
+    const rows = weekChunks.map((chunk, i) => {
+      const label = `W${i + 1} (${chunk[0]!.toISOString().slice(5, 10)}..${chunk[chunk.length - 1]!.toISOString().slice(5, 10)})`
+      return [label, ...chunk.map(d => intensitySymbol(chartCounts.get(isoDateUTC(d)) ?? 0))]
+    })
+    lines.push(`Mini Heatstamp (${params.daysChart}-day window)`)
+    lines.push(renderAsciiTable(["Week", ...weekdayHeaders], rows))
+    lines.push("")
+  }
+
+  if (showBars) {
+    const barWidth = Math.max(8, Math.min(36, width - 24))
+    lines.push(`Bar Chart (${params.daysChart}-day window, max day=${maxCount})`)
+    chartDates.forEach(d => {
+      const day = isoDateUTC(d)
+      const count = chartCounts.get(day) ?? 0
+      const bar = count === 0
+        ? "·"
+        : "█".repeat(Math.max(1, Math.round((count / Math.max(1, maxCount)) * barWidth)))
+      lines.push(`${day} | ${String(count).padStart(3, " ")} | ${bar}`)
+    })
+    lines.push("")
+  }
+
+  if (showTables && (params.groupBy === "both" || params.groupBy === "org")) {
     const orgColWidth = Math.max(12, Math.min(36, width - 35))
     const rows = params.view.orgRows.map(r => [
       ellipsize(r.org, orgColWidth),
@@ -531,7 +630,7 @@ function renderTableOutput(params: {
     lines.push("")
   }
 
-  if (params.groupBy === "both" || params.groupBy === "repo") {
+  if (showTables && (params.groupBy === "both" || params.groupBy === "repo")) {
     const repoColWidth = Math.max(24, Math.min(72, width - 28))
     const rows = params.view.repoRows.slice(0, params.topRepos).map(r => [
       ellipsize(r.repo, repoColWidth),
@@ -578,8 +677,8 @@ async function askChoice<T extends string>(prompt: string, choices: readonly T[]
 
 async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
   const items: Array<{ value: "tui" | "guided-text" | "text"; label: string }> = [
+    { value: "guided-text", label: "Quick wizard (range, filters, visualization)" },
     { value: "tui", label: "TUI (interactive browser)" },
-    { value: "guided-text", label: "Guided text output" },
     { value: "text", label: "Text output (defaults)" },
   ]
 
@@ -605,9 +704,8 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
   drawMenu(true)
   readlineCore.emitKeypressEvents(process.stdin)
   const wasRaw = process.stdin.isRaw ?? false
-  const wasPaused = process.stdin.isPaused()
   process.stdin.setRawMode(true)
-  if (wasPaused) process.stdin.resume()
+  process.stdin.resume()
 
   return await new Promise(resolve => {
     const onKeypress = (str: string, key: readlineCore.Key): void => {
@@ -646,7 +744,7 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
     const cleanup = (): void => {
       process.stdin.off("keypress", onKeypress)
       if (!wasRaw) process.stdin.setRawMode(false)
-      if (wasPaused) process.stdin.pause()
+      process.stdin.resume()
     }
 
     process.stdin.on("keypress", onKeypress)
@@ -655,33 +753,58 @@ async function chooseStartupMode(): Promise<"tui" | "guided-text" | "text"> {
 
 async function runTextWizard(options: RawOptions): Promise<RawOptions> {
   const author = options.author || getDefaultAuthor()
-  console.log("\nText mode wizard\n")
+  console.log("\nQuick setup wizard\n")
 
-  options.author = await ask("Author", author)
-  options.daysSummary = await askInt("Summary days", options.daysSummary, 1)
-  options.daysChart = await askInt("Chart days", options.daysChart, 1)
-  options.endDate = await ask("End date UTC (YYYY-MM-DD, blank for today)", options.endDate || "")
-  options.groupBy = await askChoice("Group by", ["both", "org", "repo"] as const, options.groupBy)
+  while (true) {
+    const input = await ask("Author (GitHub handle)", author)
+    try {
+      options.author = resolveGitHubLogin(input)
+      break
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.log(msg)
+    }
+  }
 
-  const includeOrg = await ask("Include orgs (comma separated, blank=none)", options.includeOrg.join(","))
+  const range = await askChoice("Time range (7d|14d|28d|90d|custom)", ["7d", "14d", "28d", "90d", "custom"] as const, "28d")
+  if (range === "custom") {
+    const customDays = await askInt("Range days", options.daysChart, 1)
+    options.daysSummary = customDays
+    options.daysChart = customDays
+  } else {
+    const days = Number(range.replace("d", ""))
+    options.daysSummary = days
+    options.daysChart = days
+  }
+
+  const endDate = await ask("End date UTC (YYYY-MM-DD, blank=today)", options.endDate || "")
+  options.endDate = endDate || undefined
+
+  options.groupBy = await askChoice("Group by (both|org|repo)", ["both", "org", "repo"] as const, options.groupBy)
+
+  const includeOrg = await ask("Include orgs (comma-separated, blank=none)", options.includeOrg.join(","))
   options.includeOrg = includeOrg ? [includeOrg] : []
-
-  const excludeOrg = await ask("Exclude orgs (comma separated, blank=none)", options.excludeOrg.join(","))
-  options.excludeOrg = excludeOrg ? [excludeOrg] : []
-
-  const includeRepo = await ask("Include repos owner/name (comma separated, blank=none)", options.includeRepo.join(","))
+  const includeRepo = await ask("Include repos owner/name (comma-separated, blank=none)", options.includeRepo.join(","))
   options.includeRepo = includeRepo ? [includeRepo] : []
-
-  const excludeRepo = await ask("Exclude repos owner/name (comma separated, blank=none)", options.excludeRepo.join(","))
-  options.excludeRepo = excludeRepo ? [excludeRepo] : []
 
   options.publicOnly = await askBool("Public repos only", options.publicOnly)
   options.excludeMerges = await askBool("Exclude merge commits", options.excludeMerges)
   options.topRepos = await askInt("Top repos to show", options.topRepos, 1)
 
-  const defaultFormat = process.stdout.isTTY ? "table" : "markdown"
-  const currentFormat = options.format === "auto" ? defaultFormat : options.format
-  options.format = await askChoice("Format", ["table", "markdown", "json"] as const, currentFormat as any)
+  options.viz = await askChoice(
+    "Visualization (summary|heat|bars|heatstamp|all|json)",
+    ["summary", "heat", "bars", "heatstamp", "all", "json"] as const,
+    options.viz,
+  )
+
+  if (options.viz === "json") {
+    options.format = "json"
+  } else if (options.viz === "all") {
+    options.format = "markdown"
+  } else {
+    options.format = "table"
+  }
+
   const outputPath = await ask("Output file (blank=stdout)", options.output || "")
   options.output = outputPath || undefined
 
@@ -695,8 +818,25 @@ function formatSet(values: Set<string>): string {
   return `${arr[0]}, ${arr[1]} +${arr.length - 2}`
 }
 
+function colorizeFilterValue(label: string, value: string): string {
+  if (label === "Author") {
+    return `{yellow-fg}${value}{/}`
+  }
+  if (label === "Public only" || label === "Exclude merges") {
+    return value === "ON" ? "{green-fg}ON{/}" : "{red-fg}OFF{/}"
+  }
+  if (label === "Refetch data" || label === "Save preset" || label === "Load preset" || label === "Reset filters" || label === "Export markdown") {
+    return "{yellow-fg}Enter{/}"
+  }
+  if (value === "(none)") {
+    return "{gray-fg}(none){/}"
+  }
+  return `{cyan-fg}${value}{/}`
+}
+
 function filterRows(state: TuiState): Array<[string, string]> {
   return [
+    ["Author", state.author],
     ["End date (UTC)", isoDateUTC(state.endDate)],
     ["Summary days", String(state.daysSummary)],
     ["Chart days", String(state.daysChart)],
@@ -708,6 +848,9 @@ function filterRows(state: TuiState): Array<[string, string]> {
     ["Public only", state.publicOnly ? "ON" : "OFF"],
     ["Exclude merges", state.excludeMerges ? "ON" : "OFF"],
     ["Top repos", String(state.topRepos)],
+    ["Refetch data", "Enter"],
+    ["Save preset", "Enter"],
+    ["Load preset", "Enter"],
     ["Reset filters", "Enter"],
     ["Export markdown", "Enter"],
   ]
@@ -728,7 +871,7 @@ function ensureTuiData(state: TuiState): void {
   state.records = records
   state.totalCountHint = totalCountHint
   state.fetchedSince = neededSince
-  setStatus(state, `Loaded ${records.length} commits since ${neededSince}.`)
+  setStatus(state, `Loaded ${records.length} commits for @${state.author} since ${neededSince}.`)
 }
 
 async function runTui(options: RawOptions): Promise<number> {
@@ -779,9 +922,11 @@ async function runTui(options: RawOptions): Promise<number> {
     keys: true,
     vi: true,
     mouse: true,
+    tags: true,
     border: "line",
     style: {
-      selected: { inverse: true },
+      border: { fg: "gray" },
+      selected: { bg: "blue", fg: "white", bold: true },
     },
   })
 
@@ -793,9 +938,11 @@ async function runTui(options: RawOptions): Promise<number> {
     keys: true,
     vi: true,
     mouse: true,
+    tags: true,
     border: "line",
     style: {
-      selected: { inverse: true },
+      border: { fg: "gray" },
+      selected: { bg: "magenta", fg: "white", bold: true },
     },
   })
 
@@ -806,7 +953,7 @@ async function runTui(options: RawOptions): Promise<number> {
     left: 0,
     width: "100%",
     height: 1,
-    content: "Keys: Up/Down move, Tab switch pane, Enter apply/open, Esc clear filter, o open commit, r reset, q quit",
+    content: "Keys: Up/Down move, Tab switch pane, Enter select, Esc clear filter, o open commit, r reset, q quit",
   })
 
   screen.append(header)
@@ -841,6 +988,23 @@ async function runTui(options: RawOptions): Promise<number> {
 
   const applyFilter = async (index: number): Promise<void> => {
     if (index === 0) {
+      const raw = await askInTui("GitHub handle (blank keeps current)", state.author)
+      if (!raw) return
+      try {
+        const login = resolveGitHubLogin(raw)
+        state.author = login
+        state.records = []
+        state.fetchedSince = undefined
+        state.totalCountHint = undefined
+        setStatus(state, `Author set to @${login}. Reloading...`)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        setStatus(state, msg, true)
+      }
+      return
+    }
+
+    if (index === 1) {
       const raw = await askInTui("End date YYYY-MM-DD (blank=today)", isoDateUTC(state.endDate))
       if (!raw) {
         state.endDate = todayUTC()
@@ -856,7 +1020,7 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    if (index === 1) {
+    if (index === 2) {
       const raw = await askInTui("Summary days", String(state.daysSummary))
       if (!raw) return
       const parsed = Number(raw)
@@ -869,7 +1033,7 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    if (index === 2) {
+    if (index === 3) {
       const raw = await askInTui("Chart days", String(state.daysChart))
       if (!raw) return
       const parsed = Number(raw)
@@ -882,43 +1046,43 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    if (index === 3) {
+    if (index === 4) {
       state.groupBy = state.groupBy === "both" ? "org" : state.groupBy === "org" ? "repo" : "both"
       setStatus(state, `Group by set to ${state.groupBy}.`)
       return
     }
 
-    if (index >= 4 && index <= 7) {
+    if (index >= 5 && index <= 8) {
       const label = [
         "Include orgs (comma-separated)",
         "Exclude orgs (comma-separated)",
         "Include repos owner/name (comma-separated)",
         "Exclude repos owner/name (comma-separated)",
-      ][index - 4]
-      const existing = [state.includeOrg, state.excludeOrg, state.includeRepo, state.excludeRepo][index - 4]
+      ][index - 5]
+      const existing = [state.includeOrg, state.excludeOrg, state.includeRepo, state.excludeRepo][index - 5]
       const raw = await askInTui(label, [...existing].sort().join(","))
       const values = raw ? splitValues([raw]) : new Set<string>()
-      if (index === 4) state.includeOrg = values
-      if (index === 5) state.excludeOrg = values
-      if (index === 6) state.includeRepo = values
-      if (index === 7) state.excludeRepo = values
+      if (index === 5) state.includeOrg = values
+      if (index === 6) state.excludeOrg = values
+      if (index === 7) state.includeRepo = values
+      if (index === 8) state.excludeRepo = values
       setStatus(state, "Filter updated.")
       return
     }
 
-    if (index === 8) {
+    if (index === 9) {
       state.publicOnly = !state.publicOnly
       setStatus(state, `Public only ${state.publicOnly ? "ON" : "OFF"}.`)
       return
     }
 
-    if (index === 9) {
+    if (index === 10) {
       state.excludeMerges = !state.excludeMerges
       setStatus(state, `Exclude merges ${state.excludeMerges ? "ON" : "OFF"}.`)
       return
     }
 
-    if (index === 10) {
+    if (index === 11) {
       const raw = await askInTui("Top repos count", String(state.topRepos))
       if (!raw) return
       const parsed = Number(raw)
@@ -931,12 +1095,91 @@ async function runTui(options: RawOptions): Promise<number> {
       return
     }
 
-    if (index === 11) {
+    if (index === 12) {
+      state.records = []
+      state.fetchedSince = undefined
+      state.totalCountHint = undefined
+      setStatus(state, "Refetch queued.")
+      return
+    }
+
+    if (index === 13) {
+      const path = await askInTui("Save preset path", "gh-viz.filters.json")
+      if (!path) {
+        setStatus(state, "Save canceled.")
+        return
+      }
+      const preset = {
+        author: state.author,
+        endDate: isoDateUTC(state.endDate),
+        daysSummary: state.daysSummary,
+        daysChart: state.daysChart,
+        groupBy: state.groupBy,
+        topRepos: state.topRepos,
+        includeOrg: [...state.includeOrg].sort(),
+        excludeOrg: [...state.excludeOrg].sort(),
+        includeRepo: [...state.includeRepo].sort(),
+        excludeRepo: [...state.excludeRepo].sort(),
+        publicOnly: state.publicOnly,
+        excludeMerges: state.excludeMerges,
+      }
+      fs.writeFileSync(path, `${JSON.stringify(preset, null, 2)}\n`, "utf8")
+      setStatus(state, `Saved preset ${path}`)
+      return
+    }
+
+    if (index === 14) {
+      const path = await askInTui("Load preset path", "gh-viz.filters.json")
+      if (!path) {
+        setStatus(state, "Load canceled.")
+        return
+      }
+      try {
+        const raw = fs.readFileSync(path, "utf8")
+        const preset = JSON.parse(raw) as Record<string, unknown>
+
+        if (typeof preset.author === "string" && preset.author.trim()) {
+          state.author = resolveGitHubLogin(preset.author)
+        }
+        if (typeof preset.endDate === "string" && preset.endDate.trim()) {
+          state.endDate = parseISODate(preset.endDate)
+        }
+        if (typeof preset.daysSummary === "number" && Number.isInteger(preset.daysSummary) && preset.daysSummary >= 1) {
+          state.daysSummary = preset.daysSummary
+        }
+        if (typeof preset.daysChart === "number" && Number.isInteger(preset.daysChart) && preset.daysChart >= 1) {
+          state.daysChart = preset.daysChart
+        }
+        if (preset.groupBy === "both" || preset.groupBy === "org" || preset.groupBy === "repo") {
+          state.groupBy = preset.groupBy
+        }
+        if (typeof preset.topRepos === "number" && Number.isInteger(preset.topRepos) && preset.topRepos >= 1) {
+          state.topRepos = preset.topRepos
+        }
+        if (Array.isArray(preset.includeOrg)) state.includeOrg = splitValues(preset.includeOrg.map(String))
+        if (Array.isArray(preset.excludeOrg)) state.excludeOrg = splitValues(preset.excludeOrg.map(String))
+        if (Array.isArray(preset.includeRepo)) state.includeRepo = splitValues(preset.includeRepo.map(String))
+        if (Array.isArray(preset.excludeRepo)) state.excludeRepo = splitValues(preset.excludeRepo.map(String))
+        if (typeof preset.publicOnly === "boolean") state.publicOnly = preset.publicOnly
+        if (typeof preset.excludeMerges === "boolean") state.excludeMerges = preset.excludeMerges
+
+        state.records = []
+        state.fetchedSince = undefined
+        state.totalCountHint = undefined
+        setStatus(state, `Loaded preset ${path}`)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        setStatus(state, `Load failed: ${msg}`, true)
+      }
+      return
+    }
+
+    if (index === 15) {
       clearFilter(index)
       return
     }
 
-    if (index === 12) {
+    if (index === 16) {
       const path = await askInTui("Export markdown path", "gh-viz.md")
       if (!path) {
         setStatus(state, "Export canceled.")
@@ -951,6 +1194,7 @@ async function runTui(options: RawOptions): Promise<number> {
         topRepos: state.topRepos,
         daysSummary: state.daysSummary,
         daysChart: state.daysChart,
+        viz: "all",
         endDate: state.endDate,
       })
       fs.writeFileSync(path, markdown, "utf8")
@@ -959,20 +1203,30 @@ async function runTui(options: RawOptions): Promise<number> {
   }
 
   const clearFilter = (index: number): void => {
-    if (index === 0) state.endDate = todayUTC()
-    if (index === 1) state.daysSummary = 7
-    if (index === 2) state.daysChart = 28
-    if (index === 3) state.groupBy = "both"
-    if (index === 4) state.includeOrg.clear()
-    if (index === 5) state.excludeOrg.clear()
-    if (index === 6) state.includeRepo.clear()
-    if (index === 7) state.excludeRepo.clear()
-    if (index === 8) state.publicOnly = false
-    if (index === 9) state.excludeMerges = false
-    if (index === 10) state.topRepos = 20
-    if (index === 11) {
+    if (index === 0) {
+      state.author = author
+      state.records = []
+      state.fetchedSince = undefined
+      state.totalCountHint = undefined
+    }
+    if (index === 1) state.endDate = todayUTC()
+    if (index === 2) state.daysSummary = 28
+    if (index === 3) state.daysChart = 28
+    if (index === 4) state.groupBy = "both"
+    if (index === 5) state.includeOrg.clear()
+    if (index === 6) state.excludeOrg.clear()
+    if (index === 7) state.includeRepo.clear()
+    if (index === 8) state.excludeRepo.clear()
+    if (index === 9) state.publicOnly = false
+    if (index === 10) state.excludeMerges = false
+    if (index === 11) state.topRepos = 20
+    if (index === 15) {
+      state.author = author
+      state.records = []
+      state.fetchedSince = undefined
+      state.totalCountHint = undefined
       state.endDate = todayUTC()
-      state.daysSummary = 7
+      state.daysSummary = 28
       state.daysChart = 28
       state.groupBy = "both"
       state.topRepos = 20
@@ -1015,13 +1269,28 @@ async function runTui(options: RawOptions): Promise<number> {
     }
 
     const activePane = focus === "commits" ? "COMMITS" : "FILTERS"
-    const title = `gh viz TUI | Active pane: ${activePane} | Tab switch pane | Enter apply/open | Esc clear filter | q quit`
+    const title = `gh viz TUI | Active pane: ${activePane} | Tab switch pane | Enter select | o open | Esc clear filter | q quit`
     header.setContent(ellipsize(title, Math.max(10, screen.width as number)))
 
     commitsLabel.setContent(focus === "commits" ? "Commits (chart window) [ACTIVE]" : "Commits (chart window)")
-    commitsLabel.style = { underline: true, bold: focus === "commits" }
+    commitsLabel.style = { underline: true, bold: focus === "commits", fg: focus === "commits" ? "cyan" : "white" }
     filtersLabel.setContent(focus === "filters" ? "Filters [ACTIVE]" : "Filters")
-    filtersLabel.style = { underline: true, bold: focus === "filters" }
+    filtersLabel.style = { underline: true, bold: focus === "filters", fg: focus === "filters" ? "magenta" : "white" }
+
+    commitsList.style = {
+      ...commitsList.style,
+      border: { fg: focus === "commits" ? "cyan" : "gray" },
+      selected: focus === "commits"
+        ? { bg: "cyan", fg: "black", bold: true }
+        : { bg: "blue", fg: "white", bold: true },
+    }
+    filtersList.style = {
+      ...filtersList.style,
+      border: { fg: focus === "filters" ? "magenta" : "gray" },
+      selected: focus === "filters"
+        ? { bg: "magenta", fg: "black", bold: true }
+        : { bg: "blue", fg: "white", bold: true },
+    }
 
     summary.setContent(
       ellipsize(
@@ -1030,32 +1299,41 @@ async function runTui(options: RawOptions): Promise<number> {
       ),
     )
 
+    const dayCounts = new Map<string, number>()
+    for (const record of currentView.chartRecords) {
+      dayCounts.set(record.day, (dayCounts.get(record.day) ?? 0) + 1)
+    }
+
     const commitItems = currentView.chartRecords.length > 0
-      ? currentView.chartRecords.map(r => `${r.day} ${r.repo} ${r.subject}`)
+      ? currentView.chartRecords.map(r => {
+        const count = dayCounts.get(r.day) ?? 0
+        return `${intensityColoredSymbol(count)} ${r.day} (${String(count).padStart(2, " ")}) ${r.repo} ${r.subject}`
+      })
       : ["(no commits for current chart window + filters)"]
     const selectedCommit = Math.min(selectedIndex(commitsList), commitItems.length - 1)
     commitsList.setItems(commitItems)
     commitsList.select(Math.max(0, selectedCommit))
 
     const fRows = filterRows(state)
-    const filterItems = fRows.map(([label, value]) => `${label}: ${value}`)
+    const filterItems = fRows.map(([label, value]) => `${label}: ${colorizeFilterValue(label, value)}`)
     const selectedFilter = Math.min(selectedIndex(filtersList), filterItems.length - 1)
     filtersList.setItems(filterItems)
     filtersList.select(Math.max(0, selectedFilter))
 
     const commitIndex = Math.min(selectedIndex(commitsList), Math.max(0, currentView.chartRecords.length - 1))
     const selected = currentView.chartRecords[commitIndex]
+    const selectedDayCount = selected ? (dayCounts.get(selected.day) ?? 0) : 0
     detail.setContent(
       ellipsize(
         selected
-          ? `${selected.repo}#${selected.sha.slice(0, 10)} ${selected.subject}`
+          ? `${intensitySymbol(selectedDayCount)} dayCount=${selectedDayCount} ${selected.repo}#${selected.sha.slice(0, 10)} ${selected.subject}`
           : "(no commit selected)",
         Math.max(10, screen.width as number),
       ),
     )
 
     const statusText = state.status || "Ready."
-    status.setContent(ellipsize(`Pane=${activePane} | ${statusText}`, Math.max(10, screen.width as number)))
+    status.setContent(ellipsize(`Pane=${activePane} | ${statusText} | Intensity: ·░▒▓█`, Math.max(10, screen.width as number)))
     status.style = state.statusError ? { fg: "red" } : { fg: "white" }
 
     if (focus === "commits") commitsList.focus()
@@ -1080,7 +1358,7 @@ async function runTui(options: RawOptions): Promise<number> {
   })
 
   screen.key(["r"], () => {
-    clearFilter(11)
+    clearFilter(15)
     render()
   })
 
@@ -1092,13 +1370,12 @@ async function runTui(options: RawOptions): Promise<number> {
     }
 
     const selected = currentView.chartRecords[selectedIndex(commitsList)]
-    if (!selected) return
-    try {
-      runGh(["browse", `${selected.repo}/commit/${selected.sha}`])
-      setStatus(state, `Opened ${selected.repo}@${selected.sha.slice(0, 7)}`)
-    } catch (error) {
-      setStatus(state, error instanceof Error ? `Open failed: ${error.message}` : "Open failed", true)
+    if (!selected) {
+      setStatus(state, "No commit selected.", true)
+      render()
+      return
     }
+    setStatus(state, `Selected ${selected.repo}@${selected.sha.slice(0, 7)} (press 'o' to open)`)
     render()
   })
 
@@ -1138,7 +1415,7 @@ function buildProgram(): Command {
     .description("Visualize authored Git commit history via gh API with filters")
     .option("--author <login>", "GitHub login to analyze (default: authenticated user)")
     .option("--mode <mode>", "Mode: auto, text, or tui", "auto")
-    .option("--days-summary <days>", "Summary window in days", "7")
+    .option("--days-summary <days>", "Summary window in days", "28")
     .option("--days-chart <days>", "Chart window in days", "28")
     .option("--end-date <yyyy-mm-dd>", "End date (UTC) in YYYY-MM-DD")
     .option("--include-org <orgs>", "Include org(s), comma-separated or repeat", collect, [])
@@ -1149,6 +1426,7 @@ function buildProgram(): Command {
     .option("--exclude-merges", "Exclude merge commits", false)
     .option("--top-repos <count>", "Number of repos to show", "20")
     .option("--group-by <group>", "Group by org|repo|both", "both")
+    .option("--viz <viz>", "Visualization: summary|heat|bars|heatstamp|all|json", "all")
     .option("--format <format>", "Output format auto|markdown|table|json", "auto")
     .option("-o, --output <path>", "Write output to file")
 
@@ -1161,11 +1439,12 @@ function normalizeOptions(program: Command): RawOptions {
   const mode = String(raw.mode || "auto") as Mode
   const groupBy = String(raw.groupBy || "both") as GroupBy
   const format = String(raw.format || "auto") as OutputFormat
+  const viz = String(raw.viz || "all") as Visualization
 
   const normalized: RawOptions = {
     author: raw.author ? String(raw.author) : undefined,
     mode,
-    daysSummary: Number(raw.daysSummary || 7),
+    daysSummary: Number(raw.daysSummary || 28),
     daysChart: Number(raw.daysChart || 28),
     endDate: raw.endDate ? String(raw.endDate) : undefined,
     includeOrg: (raw.includeOrg as string[]) || [],
@@ -1177,6 +1456,7 @@ function normalizeOptions(program: Command): RawOptions {
     topRepos: Number(raw.topRepos || 20),
     groupBy,
     format,
+    viz,
     output: raw.output ? String(raw.output) : undefined,
   }
 
@@ -1188,6 +1468,9 @@ function normalizeOptions(program: Command): RawOptions {
   }
   if (!["auto", "markdown", "table", "json"].includes(normalized.format)) {
     throw new Error("--format must be auto|markdown|table|json")
+  }
+  if (!["summary", "heat", "bars", "heatstamp", "all", "json"].includes(normalized.viz)) {
+    throw new Error("--viz must be summary|heat|bars|heatstamp|all|json")
   }
   if (!Number.isInteger(normalized.daysSummary) || normalized.daysSummary < 1) {
     throw new Error("--days-summary must be an integer >= 1")
@@ -1225,7 +1508,9 @@ async function runTextMode(options: RawOptions): Promise<number> {
     excludeMerges: options.excludeMerges,
   })
 
-  const format = resolveOutputFormat(options.format, options.output)
+  const format = options.viz === "json"
+    ? "json"
+    : resolveOutputFormat(options.format, options.output)
   const generatedAt = new Date().toISOString().replace("T", " ").replace(".000Z", " UTC")
 
   let rendered = ""
@@ -1249,6 +1534,7 @@ async function runTextMode(options: RawOptions): Promise<number> {
         publicOnly: options.publicOnly,
         excludeMerges: options.excludeMerges,
       },
+      visualization: options.viz,
       groupBy: options.groupBy,
       totals: {
         commits: view.summaryRecords.length,
@@ -1267,6 +1553,9 @@ async function runTextMode(options: RawOptions): Promise<number> {
       view,
       groupBy: options.groupBy,
       topRepos: options.topRepos,
+      daysSummary: options.daysSummary,
+      daysChart: options.daysChart,
+      viz: options.viz,
       endDate,
     })
   } else {
@@ -1279,6 +1568,7 @@ async function runTextMode(options: RawOptions): Promise<number> {
       topRepos: options.topRepos,
       daysSummary: options.daysSummary,
       daysChart: options.daysChart,
+      viz: options.viz,
       endDate,
     })
   }
