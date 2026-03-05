@@ -1362,6 +1362,7 @@ async function runTui(options: RawOptions): Promise<number> {
     loadingSpinnerIndex = 0
     try {
       setStatus(state, `Fetching @${state.author} since ${neededSince}...`)
+      render()
       const { records, totalCountHint, truncated, maxRecords } = fetchRecords(
         state.author,
         neededSince,
